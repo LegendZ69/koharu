@@ -15,7 +15,7 @@ use std::{io::Write as _, sync::Arc};
 use tauri::{State, WebviewWindow, ipc::IpcResponse};
 use tauri_runtime_cef::CefRuntime;
 
-use super::{Error, project::CurrentProject};
+use super::{Error, workspace::Workspace};
 use koharu_desktop::Desktop;
 
 const THUMBNAIL_EDGE: u32 = 128;
@@ -43,18 +43,15 @@ pub enum ExportFormat {
 pub(crate) async fn export(
     window: WebviewWindow<CefRuntime>,
     format: ExportFormat,
-    project: State<'_, CurrentProject>,
     desktop: State<'_, Desktop>,
 ) -> std::result::Result<(), Error> {
-    let (name, snapshot) = {
-        let project = project.project.lock().await;
+    let workspace = Workspace::of(&window)?;
+    let (name, binding) = {
+        let project = workspace.project.lock().await;
         let project = project.as_ref().context("no project is open")?;
-        (project.name.clone(), project.snapshot())
+        pages_to_export(&project.snapshot())?;
+        (project.name.clone(), workspace.binding())
     };
-    let pages = snapshot.pages().map(|page| page.id()).collect::<Vec<_>>();
-    if pages.is_empty() {
-        return Err(anyhow::anyhow!("there are no pages to export").into());
-    }
     let dialog = rfd::AsyncFileDialog::new().set_parent(&window);
     let destination = match format {
         ExportFormat::Png | ExportFormat::Psd => dialog.pick_folder().await,
@@ -69,6 +66,10 @@ pub(crate) async fn export(
     let Some(destination) = destination.map(|destination| destination.path().to_owned()) else {
         return Ok(());
     };
+    // A snapshot keeps the project's write lock alive, so none is held while the dialog is
+    // open, and a switch or close of the project waits for this one to drop.
+    let snapshot = workspace.export_snapshot(binding.as_deref()).await?;
+    let pages = pages_to_export(&snapshot)?;
     let renderer = desktop.renderer();
     let rasterizer = desktop.rasterizer().await?;
     let frames = try_join_all(pages.iter().map(|&page| renderer.render(&snapshot, page))).await?;
@@ -156,13 +157,21 @@ pub(crate) async fn export(
     Ok(())
 }
 
+fn pages_to_export(snapshot: &Snapshot) -> Result<Vec<EntityId>> {
+    let pages = snapshot.pages().map(|page| page.id()).collect::<Vec<_>>();
+    if pages.is_empty() {
+        anyhow::bail!("there are no pages to export");
+    }
+    Ok(pages)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn get_thumbnail(
     page: EntityId,
-    project: State<'_, CurrentProject>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<ThumbnailBytes, Error> {
-    let snapshot = project
+    let snapshot = Workspace::of(&window)?
         .project
         .lock()
         .await

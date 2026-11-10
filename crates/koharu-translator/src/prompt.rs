@@ -5,9 +5,10 @@ use indoc::indoc;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 
-use crate::{Language, TranslationContext, TranslationRequest};
+use crate::{Error, Language, TranslationContext, TranslationRequest, backend::Translations};
 
 pub(crate) fn prompts(request: &TranslationRequest) -> anyhow::Result<(String, String)> {
+    let paged = request.page_count > 1;
     let input = TranslationInput {
         source_language: request.source_language,
         target_language: request.target_language,
@@ -16,36 +17,46 @@ pub(crate) fn prompts(request: &TranslationRequest) -> anyhow::Result<(String, S
             .segments
             .iter()
             .enumerate()
-            .map(|(id, text)| TranslationInputSegment { id, text })
+            .map(|(id, text)| TranslationInputSegment {
+                id,
+                page: request.segment_pages.get(id).copied().filter(|_| paged),
+                text,
+            })
             .collect(),
     };
     let user = serde_json::to_string(&input).context("failed to serialize translation input")?;
     Ok((translation_system_prompt(request), user))
 }
 
+/// Parses a model response. A missing ID keeps its source text and is reported in `missing`.
 pub(crate) fn translations(
-    provider: &str,
+    provider: &'static str,
     text: &str,
     source_segments: &[String],
-) -> anyhow::Result<Vec<String>> {
-    let output = serde_json::from_str::<TranslationOutput>(text).with_context(|| {
-        format!(
-            "{provider} returned invalid translation JSON for {} segments; response was: {}",
-            source_segments.len(),
-            snippet(text),
-        )
-    })?;
-    let mut translations = source_segments.to_vec();
+) -> crate::Result<Translations> {
+    let output =
+        serde_json::from_str::<TranslationOutput>(text).map_err(|source| Error::InvalidOutput {
+            provider,
+            segments: source_segments.len(),
+            response: snippet(text),
+            source,
+        })?;
+    let mut segments = source_segments.to_vec();
     let mut translated = vec![false; source_segments.len()];
 
     for translation in output.translations {
-        if translation.id < translations.len() && !translated[translation.id] {
-            translations[translation.id] = translation.text;
+        if translation.id < segments.len() && !translated[translation.id] {
+            segments[translation.id] = translation.text;
             translated[translation.id] = true;
         }
     }
 
-    Ok(translations)
+    let missing = translated
+        .iter()
+        .enumerate()
+        .filter_map(|(id, translated)| (!translated).then_some(id))
+        .collect();
+    Ok(Translations { segments, missing })
 }
 
 /// Keeps a model response readable in a log line without truncating so hard
@@ -141,6 +152,19 @@ fn translation_system_prompt(request: &TranslationRequest) -> String {
     .trim_end()
     .to_owned();
 
+    if request.page_count > 1 {
+        let pages = format!(
+            indoc! {"
+                Page requirements:
+                The input segments come from {pages} manga pages in reading order; each segment's `page` is its zero-based page index.
+                Use surrounding pages only as context; never move text between pages.
+            "},
+            pages = request.page_count,
+        );
+        prompt.push_str("\n\n");
+        prompt.push_str(pages.trim_end());
+    }
+
     if !request.context.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(indoc! {"
@@ -150,13 +174,24 @@ fn translation_system_prompt(request: &TranslationRequest) -> String {
         "}.trim_end());
     }
 
-    if request.image.is_some() {
-        prompt.push_str("\n\n");
-        prompt.push_str(indoc! {"
-            Image requirements:
-            Use the attached original page image as visual context for speaker identity, tone, layout, and ambiguous OCR.
-            Translate only the supplied segments; do not add text seen in the image that is absent from the input segments.
-        "}.trim_end());
+    match request.images.len() {
+        0 => {}
+        1 => {
+            prompt.push_str("\n\n");
+            prompt.push_str(indoc! {"
+                Image requirements:
+                Use the attached original page image as visual context for speaker identity, tone, layout, and ambiguous OCR.
+                Translate only the supplied segments; do not add text seen in the image that is absent from the input segments.
+            "}.trim_end());
+        }
+        _ => {
+            prompt.push_str("\n\n");
+            prompt.push_str(indoc! {"
+                Image requirements:
+                Use the attached original page images, one per page in page order, as visual context for speaker identity, tone, layout, and ambiguous OCR.
+                Translate only the supplied segments; do not add text seen in the images that is absent from the input segments.
+            "}.trim_end());
+        }
     }
 
     if let Some(instructions) = request
@@ -182,6 +217,9 @@ struct TranslationInput<'a> {
 #[derive(Serialize)]
 struct TranslationInputSegment<'a> {
     id: usize,
+    /// Set only in a multi-page request, so a single-page payload keeps its shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<usize>,
     text: &'a str,
 }
 
@@ -216,7 +254,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use image::DynamicImage;
+
     use super::*;
+    use crate::{PageImage, Provider, TranslationPage};
 
     #[test]
     fn snippet_keeps_a_response_on_one_line() {
@@ -249,7 +290,7 @@ mod tests {
         let response = r#"{"translations":[{"id":0,"text":"hello"},{"id":1,"text":"world"}]}"#;
 
         assert_eq!(
-            translations("test", response, &source).unwrap(),
+            translations("test", response, &source).unwrap().segments,
             ["hello", "world"]
         );
     }
@@ -274,10 +315,8 @@ mod tests {
     fn parse_error_preserves_the_root_failure_and_response() {
         let source = ["one".to_owned()];
         let response = "{\n  \"translations\": [{\"id\": 0}]\n}";
-        let error = format!(
-            "{:#}",
-            translations("test", response, &source).expect_err("missing text should fail")
-        );
+        let error = translations("test", response, &source).expect_err("missing text should fail");
+        let error = format!("{:#}", anyhow::Error::from(error));
 
         assert!(error.contains("missing field `text`"), "{error}");
         assert!(
@@ -291,19 +330,18 @@ mod tests {
         let source = ["one".to_owned(), "two".to_owned()];
         let response = r#"{"translations":[{"id":1,"text":"world"},{"id":0,"text":"hello"}]}"#;
         assert_eq!(
-            translations("test", response, &source).unwrap(),
+            translations("test", response, &source).unwrap().segments,
             ["hello", "world"]
         );
     }
 
     #[test]
-    fn tolerates_duplicate_missing_and_out_of_range_ids() {
+    fn reports_missing_ids_and_ignores_duplicate_and_out_of_range_ids() {
         let source = ["one".to_owned(), "two".to_owned()];
         let short = r#"{"translations":[{"id":1,"text":"world"}]}"#;
-        assert_eq!(
-            translations("test", short, &source).unwrap(),
-            ["one", "world"]
-        );
+        let translated = translations("test", short, &source).unwrap();
+        assert_eq!(translated.segments, ["one", "world"]);
+        assert_eq!(translated.missing, [0]);
 
         let response = concat!(
             r#"{"translations":["#,
@@ -312,9 +350,49 @@ mod tests {
             r#"{"id":9,"text":"extra"}"#,
             "]}"
         );
+        let translated = translations("test", response, &source).unwrap();
+        assert_eq!(translated.segments, ["hello", "two"]);
+        assert_eq!(translated.missing, [1]);
+    }
+
+    #[test]
+    fn single_page_payload_has_no_page_fields() {
+        let (system, user) = prompts(&TranslationRequest::new(["new"], Language::English)).unwrap();
         assert_eq!(
-            translations("test", response, &source).unwrap(),
-            ["hello", "two"]
+            user,
+            r#"{"source_language":null,"target_language":"en-US","context":[],"segments":[{"id":0,"text":"new"}]}"#
+        );
+        assert!(!system.contains("Page requirements"));
+    }
+
+    #[test]
+    fn multi_page_payload_gives_each_segment_its_page() {
+        let request = TranslationRequest::pages(
+            [
+                TranslationPage {
+                    segments: vec!["a".to_owned(), "b".to_owned()],
+                    image: None,
+                },
+                TranslationPage {
+                    segments: vec!["c".to_owned()],
+                    image: None,
+                },
+            ],
+            Language::English,
+        );
+        let (system, user) = prompts(&request).unwrap();
+        let input: Value = serde_json::from_str(&user).unwrap();
+        assert_eq!(
+            input["segments"],
+            json!([
+                { "id": 0, "page": 0, "text": "a" },
+                { "id": 1, "page": 0, "text": "b" },
+                { "id": 2, "page": 1, "text": "c" }
+            ])
+        );
+        assert!(
+            system.contains("2 manga pages in reading order"),
+            "{system}"
         );
     }
 
@@ -368,12 +446,30 @@ mod tests {
         assert!(prompt.contains("Do not translate or return the context"));
     }
 
+    fn page(text: &str, image: bool) -> TranslationPage {
+        TranslationPage {
+            segments: vec![text.to_owned()],
+            image: image
+                .then(|| PageImage::new(DynamicImage::new_rgb8(1, 1), Provider::Local).unwrap()),
+        }
+    }
+
     #[test]
     fn image_context_does_not_expand_the_translation_scope() {
-        let request = TranslationRequest::new(["text"], Language::English)
-            .with_image(std::sync::Arc::new(image::DynamicImage::new_rgb8(1, 1)));
+        let request = TranslationRequest::pages([page("text", true)], Language::English);
         let prompt = translation_system_prompt(&request);
-        assert!(prompt.contains("attached original page image"));
+        assert!(prompt.contains("attached original page image as visual context"));
         assert!(prompt.contains("Translate only the supplied segments"));
+    }
+
+    #[test]
+    fn several_page_images_are_attached_one_per_page() {
+        let request =
+            TranslationRequest::pages([page("a", true), page("b", true)], Language::English);
+        let prompt = translation_system_prompt(&request);
+        assert!(
+            prompt.contains("attached original page images, one per page in page order"),
+            "{prompt}"
+        );
     }
 }

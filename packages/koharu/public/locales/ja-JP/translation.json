@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "ページを選択して開始します。",
     "fit": "ウィンドウに合わせる",
+    "fitWidth": "幅に合わせる",
     "surface": "Koharu キャンバス",
     "unavailable": "WebGPU キャンバスを利用できません"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}}工程",
     "stageCount_one": "{{count}}工程",
     "stageCount_other": "{{count}}工程",
-    "stages": "工程",
-    "stop": "停止",
-    "stopProcessing": "処理を停止"
+    "stages": "工程"
   },
   "inspector": {
     "alignBottom": "下揃え",
@@ -252,9 +251,11 @@
     "export": "プロジェクトを書き出す",
     "file": "ファイル",
     "fit": "ウィンドウに合わせる",
+    "fitWidth": "幅に合わせる",
     "github": "GitHub",
     "help": "ヘルプ",
     "import": "ページを読み込む",
+    "newWindow": "新規ウィンドウ",
     "process": "処理",
     "processLayers": "選択したレイヤーを処理",
     "processPages": "選択ページを処理",
@@ -366,7 +367,7 @@
       "description": "言語モデルによる翻訳文の生成方法を調整します。",
       "enableReasoning": "推論を有効化",
       "frequencyPenalty": "頻度ペナルティ",
-      "maxTokens": "最大トークン数",
+      "maxTokens": "ページあたりの最大トークン数",
       "minP": "最小P",
       "presencePenalty": "存在ペナルティ",
       "repeatPenalty": "繰り返しペナルティ",
@@ -436,6 +437,21 @@
     },
     "title": "設定",
     "translation": {
+      "batching": "バッチ処理",
+      "batchingDescription": "翻訳リクエストにページをまとめる方法を選択します。",
+      "batchingMode": "バッチ方式",
+      "batchingModeDescriptions": {
+        "all": "すべてのページを1回のリクエストで送信します。",
+        "auto": "モデルのコンテキストウィンドウに収まるようにページをまとめ、それでも大きすぎるリクエストは分割します。",
+        "custom": "1回のリクエストで決まった数のページを送信します。",
+        "halving": "すべてのページを1回のリクエストで送信し、大きすぎるリクエストは1ページになるまで半分ずつに分割します。"
+      },
+      "batchingModes": {
+        "all": "全ページ",
+        "auto": "自動",
+        "custom": "カスタム",
+        "halving": "二分割"
+      },
       "description": "設定済みプロバイダーのモデルを選び、共通の翻訳・生成オプションを適用します。",
       "instructionsDescription": "名前、語調、用語、書式に関する指示です。",
       "instructionsLabel": "翻訳指示",
@@ -444,6 +460,7 @@
       "modelDescription": "プロバイダー名はモデルの実行場所を示します。接続は別途設定します。",
       "modelQuantization": "モデル量子化",
       "output": "出力",
+      "pagesPerRequest": "1リクエストあたりのページ数",
       "quantization": "量子化",
       "quantizationDescription": "小さい形式はメモリ使用量を抑えますが、通常は品質とのトレードオフがあります。",
       "selectQuantization": "量子化方式を選択",
@@ -479,6 +496,8 @@
     "loadingProjects": "プロジェクトを読み込み中…",
     "newDescription": "ページ、翻訳、書き出し用の新しいワークスペースを作成します。",
     "newProject": "新規プロジェクト",
+    "openInNewWindow": "新しいウィンドウで開く",
+    "openInNewWindowLabel": "{{name}}を新しいウィンドウで開く",
     "projectKind": "Koharuプロジェクト",
     "projectList": "プロジェクト",
     "projectName": "プロジェクト名",

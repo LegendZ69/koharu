@@ -1,8 +1,35 @@
 import { describe, expect, it } from 'vitest'
 
-import { receiveDownload, useKoharuStore } from '@/lib/store'
+import { receiveDownload, receiveJob, useKoharuStore } from '@/lib/store'
+import type { Job } from '@koharu/bridge/protocol'
 
 describe('editor state', () => {
+  it('drops finished and stopped jobs and retains failed ones until they are dismissed', () => {
+    const job: Job = {
+      id: 'job',
+      state: 'running',
+      completed: 0,
+      total: 4,
+      page: null,
+      stage: null,
+      model: null,
+      error: null,
+    }
+    receiveJob(job)
+    expect(useKoharuStore.getState().jobs.job).toBe(job)
+    receiveJob({ ...job, state: 'finished', completed: 4 })
+    expect(useKoharuStore.getState().jobs).toEqual({})
+
+    receiveJob(job)
+    receiveJob({ ...job, state: 'stopped' })
+    expect(useKoharuStore.getState().jobs).toEqual({})
+
+    receiveJob({ ...job, state: 'failed', error: 'out of memory' })
+    expect(useKoharuStore.getState().jobs.job).toMatchObject({ state: 'failed' })
+    useKoharuStore.getState().dismissJob('job')
+    expect(useKoharuStore.getState().jobs).toEqual({})
+  })
+
   it('retains failed downloads until they are dismissed', () => {
     useKoharuStore.setState({ downloads: {} })
     receiveDownload({

@@ -10,12 +10,14 @@ use serde::{Deserialize, Serialize};
 
 use super::send_json;
 use crate::{
-    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::encode_image,
-    display_name, prompt,
+    GenerationConfig, Model, PageImage, Provider, Result, TranslationRequest,
+    backend::Translations, batch::Batching, display_name, prompt,
 };
 
 const URL: &str = "https://api.deepseek.com/chat/completions";
 const MODELS_URL: &str = "https://api.deepseek.com/models";
+/// Context window assumed for DeepSeek chat models.
+pub(super) const BATCHING: Batching = Batching::prompt(64_000);
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -50,20 +52,10 @@ pub(super) async fn translate(
     model: &str,
     generation: &GenerationConfig,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("deepseek")?.context("deepseek API key is not configured")?;
     let (system, user) = prompt::prompts(request)?;
-    let user_content = match request.image.as_deref() {
-        Some(image) => MessageContent::Parts(vec![
-            ContentPart::Text { text: user },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: encode_image(image)?.data_url(),
-                },
-            },
-        ]),
-        None => MessageContent::Text(user),
-    };
+    let user_content = MessageContent::user(user, &request.images)?;
     let body = ChatRequest {
         model,
         messages: [
@@ -102,13 +94,13 @@ pub(super) async fn translate(
         .message
         .content
         .context("DeepSeek returned no message content")?;
-    Ok(prompt::translations("deepseek", &text, &request.segments)?)
+    prompt::translations("deepseek", &text, &request.segments)
 }
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: [Message; 2],
+    messages: [Message<'a>; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,28 +125,45 @@ struct ResponseFormat {
 }
 
 #[derive(Serialize)]
-struct Message {
+struct Message<'a> {
     role: &'static str,
-    content: MessageContent,
+    content: MessageContent<'a>,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum MessageContent {
+enum MessageContent<'a> {
     Text(String),
-    Parts(Vec<ContentPart>),
+    Parts(Vec<ContentPart<'a>>),
+}
+
+impl<'a> MessageContent<'a> {
+    fn user(text: String, images: &'a [PageImage]) -> anyhow::Result<Self> {
+        if images.is_empty() {
+            return Ok(Self::Text(text));
+        }
+        let mut parts = vec![ContentPart::Text { text }];
+        for image in images {
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: image.data_url()?,
+                },
+            });
+        }
+        Ok(Self::Parts(parts))
+    }
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContentPart {
+enum ContentPart<'a> {
     Text { text: String },
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl { image_url: ImageUrl<'a> },
 }
 
 #[derive(Serialize)]
-struct ImageUrl {
-    url: String,
+struct ImageUrl<'a> {
+    url: &'a str,
 }
 
 #[derive(Deserialize)]

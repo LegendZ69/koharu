@@ -128,6 +128,9 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (!open) return
+    // Preferences saved in another window arrive here too. Edits not yet handed to a save are
+    // kept, and the pending autosave writes them.
+    if (lastSaved.current !== null && currentDraft.current !== lastSaved.current) return
     setPipeline(preferences?.pipeline ?? null)
     setProviders(preferences?.providers ?? null)
     setTypesetting(preferences?.typesetting ?? null)
@@ -311,6 +314,7 @@ function ShortcutPreferences() {
     'remove',
     'pan',
     'fit',
+    'fitWidth',
   ]
   return (
     <PreferencePage
@@ -348,4 +352,5 @@ const shortcutKeys: Record<ShortcutAction, string> = {
   remove: 'tools.remove',
   pan: 'tools.pan',
   fit: 'canvas.fit',
+  fitWidth: 'canvas.fitWidth',
 }

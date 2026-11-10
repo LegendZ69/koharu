@@ -2,22 +2,19 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow, bail};
 use image::{GrayImage, ImageEncoder as _, codecs::png::PngEncoder};
-use koharu_desktop::{CanvasState, Desktop, Frame, TransformFrame};
+use koharu_desktop::{Frame, TransformFrame};
 use koharu_rasterizer::ResourceId;
 use koharu_scene::{EntityId, Revision};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{
-    AppHandle, Manager as _, State,
-    ipc::{Channel, IpcResponse},
-};
+use tauri::{WebviewWindow, ipc::IpcResponse};
 use tauri_runtime_cef::CefRuntime;
 
 use super::{
-    ChannelExt as _, Error, processing,
-    processing::{JobChannel, JobId, Processing},
-    project::{CurrentProject, Page, Project, RasterStrokeMode},
+    Error,
+    processing::{self, JobId},
+    project::{Page, Project, RasterStrokeMode},
+    workspace::Workspace,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize, Type)]
@@ -58,18 +55,16 @@ impl IpcResponse for CanvasBytes {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct CanvasChannel {
-    pub(crate) channel: Mutex<Option<Channel<CanvasState>>>,
-}
-
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn get_canvas_manifest(
     generation: CanvasGeneration,
-    desktop: State<'_, Desktop>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<CanvasBytes, Error> {
-    Ok(CanvasBytes(desktop.frame_manifest_bytes(generation.0)?))
+    let workspace = Workspace::of(&window)?;
+    Ok(CanvasBytes(
+        workspace.presentation.frame_manifest_bytes(generation.0)?,
+    ))
 }
 
 #[tauri::command]
@@ -77,13 +72,16 @@ pub(crate) async fn get_canvas_manifest(
 pub(crate) async fn get_canvas_resource(
     generation: CanvasGeneration,
     resource: String,
-    desktop: State<'_, Desktop>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<CanvasBytes, Error> {
     let resource = resource
         .parse::<ResourceId>()
         .context("canvas resource id is invalid")?;
+    let workspace = Workspace::of(&window)?;
     Ok(CanvasBytes(
-        desktop.frame_resource_bytes(generation.0, resource)?,
+        workspace
+            .presentation
+            .frame_resource_bytes(generation.0, resource)?,
     ))
 }
 
@@ -91,18 +89,19 @@ pub(crate) async fn get_canvas_resource(
 #[specta::specta]
 pub(crate) async fn prepare_canvas_page(
     page: EntityId,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<Option<CanvasPagePreparation>, Error> {
+    let workspace = Workspace::of(&window)?;
     let (snapshot, prepared_page) = {
-        let project = project.project.lock().await;
+        let project = workspace.project.lock().await;
         let project = project.as_ref().context("no project is open")?;
         let snapshot = project.snapshot();
         let prepared_page = Project::page(&snapshot, page)?;
         (snapshot, prepared_page)
     };
     let revision = snapshot.revision();
-    Ok(desktop
+    Ok(workspace
+        .presentation
         .prepare_page(&snapshot, page)
         .await?
         .then_some(CanvasPagePreparation {
@@ -116,9 +115,12 @@ pub(crate) async fn prepare_canvas_page(
 pub(crate) async fn get_canvas_page_manifest(
     page: EntityId,
     revision: Revision,
-    desktop: State<'_, Desktop>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<CanvasBytes, Error> {
-    Ok(CanvasBytes(desktop.page_manifest_bytes(page, revision)?))
+    let workspace = Workspace::of(&window)?;
+    Ok(CanvasBytes(
+        workspace.presentation.page_manifest_bytes(page, revision)?,
+    ))
 }
 
 #[tauri::command]
@@ -127,13 +129,16 @@ pub(crate) async fn get_canvas_page_resource(
     page: EntityId,
     revision: Revision,
     resource: String,
-    desktop: State<'_, Desktop>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<CanvasBytes, Error> {
     let resource = resource
         .parse::<ResourceId>()
         .context("canvas resource id is invalid")?;
+    let workspace = Workspace::of(&window)?;
     Ok(CanvasBytes(
-        desktop.page_resource_bytes(page, revision, resource)?,
+        workspace
+            .presentation
+            .page_resource_bytes(page, revision, resource)?,
     ))
 }
 
@@ -141,12 +146,11 @@ pub(crate) async fn get_canvas_page_resource(
 #[specta::specta]
 pub(crate) async fn add_point_text(
     point: Point,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
-    canvas_channel: State<'_, CanvasChannel>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<LayerCommit, Error> {
+    let workspace = Workspace::of(&window)?;
     let (commit, page, layer) = {
-        let mut project = project.project.lock().await;
+        let mut project = workspace.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
         let page = project
             .active_page()
@@ -155,8 +159,7 @@ pub(crate) async fn add_point_text(
         project.record_commit(&commit);
         (commit, project.active_page(), layer)
     };
-    desktop.synchronize(&commit.snapshot, page, &commit).await?;
-    canvas_channel.channel.publish(desktop.canvas_state());
+    workspace.synchronize(&commit, page).await?;
     Ok(LayerCommit {
         revision: commit.revision,
         layer,
@@ -167,12 +170,11 @@ pub(crate) async fn add_point_text(
 #[specta::specta]
 pub(crate) async fn add_text_box(
     frame: Frame,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
-    canvas_channel: State<'_, CanvasChannel>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<LayerCommit, Error> {
+    let workspace = Workspace::of(&window)?;
     let (commit, page, layer) = {
-        let mut project = project.project.lock().await;
+        let mut project = workspace.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
         let page = project
             .active_page()
@@ -181,8 +183,7 @@ pub(crate) async fn add_text_box(
         project.record_commit(&commit);
         (commit, project.active_page(), layer)
     };
-    desktop.synchronize(&commit.snapshot, page, &commit).await?;
-    canvas_channel.channel.publish(desktop.canvas_state());
+    workspace.synchronize(&commit, page).await?;
     Ok(LayerCommit {
         revision: commit.revision,
         layer,
@@ -196,10 +197,9 @@ pub(crate) async fn commit_paint(
     layer: Option<EntityId>,
     points: Vec<Point>,
     brush: PaintBrush,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
-    canvas_channel: State<'_, CanvasChannel>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<LayerCommit, Error> {
+    let workspace = Workspace::of(&window)?;
     commit_raster_stroke(
         expected_revision,
         layer,
@@ -207,9 +207,7 @@ pub(crate) async fn commit_paint(
         brush.diameter,
         brush.color,
         RasterStrokeMode::Paint,
-        &desktop,
-        &project,
-        &canvas_channel,
+        &workspace,
     )
     .await
 }
@@ -221,10 +219,9 @@ pub(crate) async fn commit_erase(
     layer: EntityId,
     points: Vec<Point>,
     diameter: f32,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
-    canvas_channel: State<'_, CanvasChannel>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<LayerCommit, Error> {
+    let workspace = Workspace::of(&window)?;
     commit_raster_stroke(
         expected_revision,
         Some(layer),
@@ -232,14 +229,11 @@ pub(crate) async fn commit_erase(
         diameter,
         [0; 4],
         RasterStrokeMode::Erase,
-        &desktop,
-        &project,
-        &canvas_channel,
+        &workspace,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn commit_raster_stroke(
     expected_revision: Revision,
     layer: Option<EntityId>,
@@ -247,12 +241,10 @@ async fn commit_raster_stroke(
     diameter: f32,
     color: [u8; 4],
     mode: RasterStrokeMode,
-    desktop: &Desktop,
-    project: &CurrentProject,
-    canvas_channel: &CanvasChannel,
+    workspace: &Workspace,
 ) -> Result<LayerCommit, Error> {
     let (commit, page, element) = {
-        let mut project = project.project.lock().await;
+        let mut project = workspace.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
         ensure_revision(project.snapshot().revision(), expected_revision)?;
         let page = project
@@ -277,8 +269,7 @@ async fn commit_raster_stroke(
         project.record_commit(&commit);
         (commit, project.active_page(), element)
     };
-    desktop.synchronize(&commit.snapshot, page, &commit).await?;
-    canvas_channel.channel.publish(desktop.canvas_state());
+    workspace.synchronize(&commit, page).await?;
     Ok(LayerCommit {
         revision: commit.revision,
         layer: element,
@@ -290,24 +281,24 @@ async fn commit_raster_stroke(
 pub(crate) async fn commit_transform(
     expected_revision: Revision,
     elements: Vec<TransformFrame>,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
-    canvas_channel: State<'_, CanvasChannel>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<Option<Revision>, Error> {
-    let geometries = desktop.transform_geometries(expected_revision, &elements)?;
+    let workspace = Workspace::of(&window)?;
+    let geometries = workspace
+        .presentation
+        .transform_geometries(expected_revision, &elements)?;
     if geometries.is_empty() {
         return Ok(None);
     }
     let (commit, page) = {
-        let mut project = project.project.lock().await;
+        let mut project = workspace.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
         ensure_revision(project.snapshot().revision(), expected_revision)?;
         let commit = project.set_geometries(geometries).await?;
         project.record_commit(&commit);
         (commit, project.active_page())
     };
-    desktop.synchronize(&commit.snapshot, page, &commit).await?;
-    canvas_channel.channel.publish(desktop.canvas_state());
+    workspace.synchronize(&commit, page).await?;
     Ok(Some(commit.revision))
 }
 
@@ -317,8 +308,7 @@ pub(crate) async fn commit_inpaint(
     expected_revision: Revision,
     points: Vec<Point>,
     diameter: f32,
-    handle: AppHandle<CefRuntime>,
-    project: State<'_, CurrentProject>,
+    window: WebviewWindow<CefRuntime>,
 ) -> Result<Option<JobId>, Error> {
     if !diameter.is_finite() || diameter <= 0.0 || points.is_empty() {
         return Err(anyhow!(
@@ -332,8 +322,9 @@ pub(crate) async fn commit_inpaint(
     {
         return Err(anyhow!("inpaint stroke points must be finite").into());
     }
+    let workspace = Workspace::of(&window)?;
     let (page, width, height) = {
-        let project = project.project.lock().await;
+        let project = workspace.project.lock().await;
         let project = project.as_ref().context("no project is open")?;
         let snapshot = project.snapshot();
         ensure_revision(snapshot.revision(), expected_revision)?;
@@ -349,23 +340,19 @@ pub(crate) async fn commit_inpaint(
     };
     let (png, bounds) =
         tokio_rayon::spawn(move || encode_mask(width, height, &points, diameter)).await?;
-    *handle.state::<Processing>().inpainting_mask.lock() = Some(koharu_pipeline::InpaintingMask {
-        page,
-        png: Arc::from(png),
-    });
-    Ok(Some(
-        processing::process(
-            handle.clone(),
-            koharu_pipeline::Scope::Region { page, bounds },
-            koharu_pipeline::Operation::Only {
-                stage: koharu_pipeline::Stage::Inpainting,
-            },
-            handle.state::<CurrentProject>(),
-            handle.state::<Processing>(),
-            handle.state::<JobChannel>(),
-        )
-        .await?,
-    ))
+    let (job, _) = processing::start_job(
+        &workspace,
+        koharu_pipeline::Scope::Region { page, bounds },
+        koharu_pipeline::Operation::Only {
+            stage: koharu_pipeline::Stage::Inpainting,
+        },
+        Some(koharu_pipeline::InpaintingMask {
+            page,
+            png: Arc::from(png),
+        }),
+    )
+    .await?;
+    Ok(Some(job))
 }
 
 fn ensure_revision(actual: Revision, expected: Revision) -> anyhow::Result<()> {

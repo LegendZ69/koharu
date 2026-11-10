@@ -1,25 +1,28 @@
-use anyhow::{Context as _, Result};
-use koharu_desktop::{CanvasState, Desktop};
+use std::path::PathBuf;
+
+use anyhow::{Context as _, Result, anyhow, bail};
+use koharu_desktop::CanvasState;
 use koharu_scene::{AssetInput, AssetMetadata, AssetRole, At, PageDraft};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use strum::{EnumMessage as _, IntoEnumIterator as _};
-use tauri::{AppHandle, Manager as _, State, WebviewWindow, ipc::Channel};
+use tauri::{AppHandle, Manager as _, State, WebviewWindow, WebviewWindowBuilder, ipc::Channel};
 use tauri_runtime_cef::CefRuntime;
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 use super::{
-    ChannelExt as _, Error,
-    agent::AgentState,
-    canvas::CanvasChannel,
-    import,
+    Error, import,
     preferences::Preferences,
-    processing::{Job, JobChannel, Processing},
-    project::{
-        CurrentProject, Page, PageSummary, Project, ProjectInfo, ProjectLibrary, ProjectSummary,
+    processing::Job,
+    project::{Page, PageSummary, Project, ProjectInfo, ProjectLibrary, ProjectSummary},
+    workspace::{
+        Claim, MAIN_WINDOW, Reservation, Workspace, Workspaces, focus_window, window_title,
     },
 };
+
+/// How far a new window is offset from the focused one, in logical pixels.
+const WINDOW_CASCADE: f64 = 32.0;
 
 #[derive(Clone, Debug, Serialize, Type)]
 pub struct StartupState {
@@ -82,11 +85,6 @@ pub struct Download {
     pub error: Option<String>,
 }
 
-#[derive(Default)]
-pub(crate) struct DownloadChannel {
-    pub(crate) channel: Mutex<Option<Channel<Download>>>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadState {
@@ -103,16 +101,6 @@ pub struct ModelResources {
     pub system_memory: u64,
     pub process_cpu: f32,
     pub devices: Vec<DeviceResources>,
-}
-
-#[derive(Default)]
-pub(crate) struct ResourceChannel {
-    pub(crate) channel: Mutex<Option<Channel<ModelResources>>>,
-}
-
-#[derive(Default)]
-pub(crate) struct ProjectChannel {
-    pub(crate) channel: Mutex<Option<Channel<Option<ProjectInfo>>>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Type)]
@@ -150,78 +138,131 @@ impl From<koharu_pipeline::ResourceSnapshot> for ModelResources {
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn subscribe(
-    handle: AppHandle<CefRuntime>,
+    window: WebviewWindow<CefRuntime>,
     on_canvas: Channel<CanvasState>,
     on_job: Channel<Job>,
     on_download: Channel<Download>,
     on_resources: Channel<ModelResources>,
     on_project: Channel<Option<ProjectInfo>>,
+    on_preferences: Channel<Preferences>,
 ) -> std::result::Result<StartupState, Error> {
-    handle.state::<Initialization>().wait().await?;
+    window.state::<Initialization>().wait().await?;
+    let workspace = Workspace::of(&window)?;
 
-    *handle.state::<CanvasChannel>().channel.lock() = Some(on_canvas);
-    *handle.state::<JobChannel>().channel.lock() = Some(on_job);
-    *handle.state::<DownloadChannel>().channel.lock() = Some(on_download);
-    *handle.state::<ResourceChannel>().channel.lock() = Some(on_resources);
-    *handle.state::<ProjectChannel>().channel.lock() = Some(on_project);
+    *workspace.channels.canvas.lock() = Some(on_canvas);
+    *workspace.channels.job.lock() = Some(on_job);
+    *workspace.channels.download.lock() = Some(on_download);
+    *workspace.channels.resources.lock() = Some(on_resources);
+    *workspace.channels.project.lock() = Some(on_project);
+    *workspace.channels.preferences.lock() = Some(on_preferences);
 
-    let canvas = handle.state::<Desktop>().canvas_state();
     let preferences = Preferences::load()?;
     Ok(StartupState {
         preferences,
-        jobs: handle
-            .state::<Processing>()
-            .jobs
-            .lock()
-            .values()
-            .cloned()
-            .collect(),
-        canvas,
+        jobs: workspace.processing.jobs(),
+        canvas: workspace.presentation.canvas_state(),
     })
 }
 
-async fn replace_project(handle: &AppHandle<CefRuntime>, opened: Project) -> Result<()> {
-    let snapshot = opened.snapshot();
-    let page = opened.active_page();
-    let info = opened.info();
-
-    handle.state::<AgentState>().reset().await;
-    let processing = handle.state::<Processing>();
-    for stop in processing.stops.lock().values() {
-        stop.stop();
-    }
-    processing.stops.lock().clear();
-    processing.jobs.lock().clear();
-
-    let previous = {
-        let current = handle.state::<CurrentProject>();
-        let mut current = current.project.lock().await;
-        current.replace(opened)
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn open_window(
+    project: Option<String>,
+    handle: AppHandle<CefRuntime>,
+) -> std::result::Result<(), Error> {
+    let label = format!("workspace-{}", Uuid::new_v4().simple());
+    let project = match project {
+        Some(name) => match reserve_project(&handle, &label, &name).await? {
+            Some(project) => Some(project),
+            None => return Ok(()),
+        },
+        None => None,
     };
-
-    let desktop = handle.state::<Desktop>();
-    desktop.show_page(&snapshot, page).await?;
-    let canvas = desktop.canvas_state();
-    drop(previous);
-    handle.state::<CanvasChannel>().channel.publish(canvas);
-    handle.state::<ProjectChannel>().channel.publish(Some(info));
+    let workspace = Workspace::new(label.clone(), &handle)?;
+    let workspaces = handle.state::<Workspaces>();
+    workspaces.insert(workspace.clone());
+    if let Err(error) = build_window(&handle, &workspace, project).await {
+        workspaces.remove(&label);
+        workspace.replace(None).await?;
+        return Err(error.into());
+    }
     Ok(())
+}
+
+async fn build_window(
+    handle: &AppHandle<CefRuntime>,
+    workspace: &Workspace,
+    project: Option<(String, PathBuf, Reservation)>,
+) -> Result<()> {
+    let mut config = handle
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == MAIN_WINDOW)
+        .context("the main Tauri window configuration is unavailable")?
+        .clone();
+    config.label.clone_from(&workspace.label);
+    if let Some((name, path, reservation)) = project {
+        config.title = window_title(Some(&name));
+        let opened = Project::open(name, path).await?;
+        workspace.replace(Some((reservation, opened))).await?;
+    }
+    if let Some(anchor) = handle.state::<Workspaces>().focus_target(handle)
+        && let (Ok(position), Ok(scale)) = (anchor.outer_position(), anchor.scale_factor())
+    {
+        let position = position.to_logical::<f64>(scale);
+        config.x = Some(position.x + WINDOW_CASCADE);
+        config.y = Some(position.y + WINDOW_CASCADE);
+        config.center = false;
+    }
+    let window = WebviewWindowBuilder::from_config(handle, &config)?
+        .build()
+        .context("failed to create the window")?;
+    focus_window(&window);
+    Ok(())
+}
+
+/// Resolves `name` and reserves its project directory for the window `label`, after any window
+/// closing the project has dropped it. A project that a window is opening or has open is
+/// focused in that window instead, and `None` is returned.
+async fn reserve_project(
+    handle: &AppHandle<CefRuntime>,
+    label: &str,
+    name: &str,
+) -> Result<Option<(String, PathBuf, Reservation)>> {
+    let (name, path) = handle.state::<ProjectLibrary>().resolve(name)?;
+    let workspaces = handle.state::<Workspaces>();
+    let holder = match workspaces.reserve(&path, label).await {
+        Claim::Reserved(reservation) => return Ok(Some((name, path, reservation))),
+        Claim::Open(holder) => holder,
+        Claim::Closed => bail!("the window has closed"),
+        Claim::Closing => unreachable!("reserving waits while a window closes the project"),
+    };
+    match handle.get_webview_window(&holder) {
+        Some(window) => focus_window(&window),
+        // A registered workspace without a window is a new window, which is focused once built.
+        None if workspaces.get(&holder).is_some() => {}
+        None => bail!("the project is still opening or closing in another window"),
+    }
+    Ok(None)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn get_project(
-    project: State<'_, CurrentProject>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<Option<ProjectInfo>, Error> {
-    Ok(project.project.lock().await.as_ref().map(Project::info))
+    let workspace = Workspace::of(&window)?;
+    Ok(workspace.project.lock().await.as_ref().map(Project::info))
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn get_pages(
-    project: State<'_, CurrentProject>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<Vec<PageSummary>, Error> {
-    let snapshot = project
+    let snapshot = Workspace::of(&window)?
         .project
         .lock()
         .await
@@ -234,10 +275,11 @@ pub(crate) async fn get_pages(
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn get_page(
-    project: State<'_, CurrentProject>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<Option<Page>, Error> {
+    let workspace = Workspace::of(&window)?;
     let current = {
-        let project = project.project.lock().await;
+        let project = workspace.project.lock().await;
         project
             .as_ref()
             .map(|project| (project.snapshot(), project.active_page()))
@@ -260,11 +302,27 @@ pub(crate) async fn list_projects(
 #[specta::specta]
 pub(crate) async fn create_project(
     name: String,
-    handle: AppHandle<CefRuntime>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<(), Error> {
-    let library = handle.state::<ProjectLibrary>().inner().clone();
-    let opened = library.create(&name).await?;
-    replace_project(&handle, opened).await?;
+    let workspace = Workspace::of(&window)?;
+    let (name, path) = window.state::<ProjectLibrary>().resolve(&name)?;
+    let reservation = match window
+        .state::<Workspaces>()
+        .reserve(&path, &workspace.label)
+        .await
+    {
+        Claim::Reserved(reservation) => reservation,
+        Claim::Open(holder) if holder == workspace.label => {
+            return Err(anyhow!("a project with this name is open in this window").into());
+        }
+        Claim::Open(_) => {
+            return Err(anyhow!("a project with this name is open in another window").into());
+        }
+        Claim::Closed => return Err(anyhow!("the window has closed").into()),
+        Claim::Closing => unreachable!("reserving waits while a window closes the project"),
+    };
+    let created = Project::create(name, path).await?;
+    workspace.replace(Some((reservation, created))).await?;
     Ok(())
 }
 
@@ -272,18 +330,25 @@ pub(crate) async fn create_project(
 #[specta::specta]
 pub(crate) async fn open_project(
     name: String,
-    handle: AppHandle<CefRuntime>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<(), Error> {
-    let library = handle.state::<ProjectLibrary>().inner().clone();
-    let opened = library.open(&name).await?;
-    replace_project(&handle, opened).await?;
+    let workspace = Workspace::of(&window)?;
+    let Some((name, path, reservation)) =
+        reserve_project(window.app_handle(), &workspace.label, &name).await?
+    else {
+        return Ok(());
+    };
+    let opened = Project::open(name, path).await?;
+    workspace.replace(Some((reservation, opened))).await?;
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn close_project(handle: AppHandle<CefRuntime>) -> std::result::Result<(), Error> {
-    close_current_project(&handle).await?;
+pub(crate) async fn close_project(
+    window: WebviewWindow<CefRuntime>,
+) -> std::result::Result<(), Error> {
+    Workspace::of(&window)?.replace(None).await?;
     Ok(())
 }
 
@@ -291,44 +356,24 @@ pub(crate) async fn close_project(handle: AppHandle<CefRuntime>) -> std::result:
 #[specta::specta]
 pub(crate) async fn delete_project(
     name: String,
-    handle: AppHandle<CefRuntime>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<(), Error> {
-    let active = handle
-        .state::<CurrentProject>()
-        .project
-        .lock()
-        .await
-        .as_ref()
-        .is_some_and(|project| project.name == name);
-    if active {
-        close_current_project(&handle).await?;
-    }
-    let library = handle.state::<ProjectLibrary>().inner().clone();
+    let library = window.state::<ProjectLibrary>().inner().clone();
+    let (_, path) = library.resolve(&name)?;
+    let reservation = match window.state::<Workspaces>().claim(&path, window.label()) {
+        Claim::Reserved(reservation) => reservation,
+        Claim::Open(holder) if holder == window.label() => {
+            return Err(anyhow!("the project is open in this window").into());
+        }
+        Claim::Open(_) => return Err(anyhow!("the project is open in another window").into()),
+        Claim::Closing => return Err(anyhow!("the project is still closing").into()),
+        Claim::Closed => return Err(anyhow!("the window has closed").into()),
+    };
+    // Windows that open the project meanwhile wait for the deletion instead of racing it.
+    reservation.close();
     tokio::task::spawn_blocking(move || library.delete(&name))
         .await
         .context("project deletion task failed")??;
-    Ok(())
-}
-
-async fn close_current_project(handle: &AppHandle<CefRuntime>) -> Result<()> {
-    handle.state::<AgentState>().reset().await;
-    let processing = handle.state::<Processing>();
-    for stop in processing.stops.lock().values() {
-        stop.stop();
-    }
-    processing.stops.lock().clear();
-    processing.jobs.lock().clear();
-    let previous = {
-        let current = handle.state::<CurrentProject>();
-        let mut current = current.project.lock().await;
-        current.take()
-    };
-    let desktop = handle.state::<Desktop>();
-    desktop.clear().await;
-    let result = desktop.canvas_state();
-    drop(previous);
-    handle.state::<CanvasChannel>().channel.publish(result);
-    handle.state::<ProjectChannel>().channel.publish(None);
     Ok(())
 }
 
@@ -337,12 +382,9 @@ async fn close_current_project(handle: &AppHandle<CefRuntime>) -> Result<()> {
 pub(crate) async fn import(
     source: PageImportSource,
     window: WebviewWindow<CefRuntime>,
-    desktop: State<'_, Desktop>,
-    project: State<'_, CurrentProject>,
-    processing: State<'_, Processing>,
-    canvas_channel: State<'_, CanvasChannel>,
 ) -> std::result::Result<(), Error> {
-    if !processing.stops.lock().is_empty() {
+    let workspace = Workspace::of(&window)?;
+    if workspace.processing.is_running() {
         return Err(anyhow::anyhow!("pages cannot be imported while processing is running").into());
     }
     let extensions = import::Format::iter()
@@ -387,7 +429,7 @@ pub(crate) async fn import(
     let pages = tokio_rayon::spawn(move || import::import(files)).await?;
 
     let (commit, page) = {
-        let mut project = project.project.lock().await;
+        let mut project = workspace.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
         let source = AssetRole::new("source")?;
         let patch = project.snapshot().patch(|edit| {
@@ -422,22 +464,19 @@ pub(crate) async fn import(
         let page = project.active_page();
         (commit, page)
     };
-    desktop.synchronize(&commit.snapshot, page, &commit).await?;
-    let canvas = desktop.canvas_state();
-    canvas_channel.channel.publish(canvas);
+    workspace.synchronize(&commit, page).await?;
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn select_page(
-    desktop: State<'_, Desktop>,
     page: koharu_scene::EntityId,
-    project: State<'_, CurrentProject>,
-    canvas_channel: State<'_, CanvasChannel>,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<PageSelection, Error> {
+    let workspace = Workspace::of(&window)?;
     let (snapshot, project_info, selected_page) = {
-        let mut project = project.project.lock().await;
+        let mut project = workspace.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
         project.select_page(page)?;
         let snapshot = project.snapshot();
@@ -445,9 +484,12 @@ pub(crate) async fn select_page(
         let selected_page = Project::page(&snapshot, page)?;
         (snapshot, project_info, selected_page)
     };
-    if desktop.show_page(&snapshot, Some(page)).await? {
-        let canvas = desktop.canvas_state();
-        canvas_channel.channel.publish(canvas);
+    if workspace
+        .presentation
+        .show_page(&snapshot, Some(page))
+        .await?
+    {
+        workspace.publish_canvas();
     }
     Ok(PageSelection {
         project: project_info,

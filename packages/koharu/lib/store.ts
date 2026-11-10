@@ -7,6 +7,7 @@ import type {
   Download,
   EntityId,
   Job,
+  JobId,
   Model,
   Frame,
   Preferences,
@@ -16,6 +17,8 @@ import type {
   PageSize,
 } from '@koharu/bridge/protocol'
 import { toast } from '@koharu/ui/components/toast'
+
+import type { CanvasFit } from './geometry'
 
 export type CanvasTool = 'select' | 'text' | 'draw' | 'eraser' | 'color_picker' | 'remove' | 'pan'
 export const MIN_BRUSH_DIAMETER = 1
@@ -34,7 +37,7 @@ export interface CanvasBrush {
   color: string
 }
 export type InspectorSection = 'copy' | 'type' | 'layers'
-export type ShortcutAction = CanvasTool | 'fit'
+export type ShortcutAction = CanvasTool | 'fit' | 'fitWidth'
 export type Shortcuts = Record<ShortcutAction, string>
 export type PipelineScope = 'page' | 'selected-pages' | 'project'
 export const pipelineStages: readonly Stage[] = ['detection', 'ocr', 'translation', 'inpainting']
@@ -45,13 +48,16 @@ interface KoharuStore {
   translationModels: Model[]
   resources: ModelResources | null
   jobs: Record<string, Job>
+  endedJobs: JobId[]
   downloads: Record<string, Download>
-  camera: { zoom: number; translation: [number, number]; fitted: boolean }
+  camera: { zoom: number; translation: [number, number]; fit: CanvasFit | null }
   canvasPage: EntityId | null
   canvasRevision: number | null
   canvasGeneration: number
   canvasSize: [number, number]
+  canvasViewport: [number, number]
   fitCanvasRequest: number
+  fitMode: CanvasFit
   layerFrames: Record<EntityId, Frame>
   selectedLayers: EntityId[]
   selectedPages: EntityId[]
@@ -71,7 +77,7 @@ interface KoharuStore {
   setTool: (tool: CanvasTool) => void
   setBrush: (brush: CanvasBrush) => void
   setShortcut: (action: ShortcutAction, key: string) => void
-  requestCanvasFit: () => void
+  requestCanvasFit: (fit: CanvasFit) => void
   dismissJob: (id: string) => void
   dismissDownload: (id: number) => void
 }
@@ -85,6 +91,7 @@ export const defaultShortcuts: Shortcuts = {
   remove: 'j',
   pan: 'h',
   fit: '0',
+  fitWidth: 'w',
 }
 
 export const useKoharuStore = create<KoharuStore>()((set) => ({
@@ -93,13 +100,16 @@ export const useKoharuStore = create<KoharuStore>()((set) => ({
   translationModels: [],
   resources: null,
   jobs: {},
+  endedJobs: [],
   downloads: {},
-  camera: { zoom: 1, translation: [0, 0], fitted: true },
+  camera: { zoom: 1, translation: [0, 0], fit: 'page' },
   canvasPage: null,
   canvasRevision: null,
   canvasGeneration: 0,
   canvasSize: [0, 0],
+  canvasViewport: [0, 0],
   fitCanvasRequest: 0,
+  fitMode: 'page',
   layerFrames: {},
   selectedLayers: [],
   selectedPages: [],
@@ -122,7 +132,8 @@ export const useKoharuStore = create<KoharuStore>()((set) => ({
     set((state) => ({
       shortcuts: { ...state.shortcuts, [action]: key.toLowerCase().slice(0, 1) },
     })),
-  requestCanvasFit: () => set((state) => ({ fitCanvasRequest: state.fitCanvasRequest + 1 })),
+  requestCanvasFit: (fitMode) =>
+    set((state) => ({ fitMode, fitCanvasRequest: state.fitCanvasRequest + 1 })),
   dismissJob: (id) =>
     set((state) => {
       const jobs = { ...state.jobs }
@@ -150,8 +161,18 @@ export function receiveCanvas(canvas: CanvasState): void {
   useKoharuStore.setState(canvasSnapshot(canvas))
 }
 
+// A command's result and its job's messages arrive in no fixed order, so the ids of recently
+// ended jobs tell a job that ended from one that was not reported yet.
+const ENDED_JOB_LIMIT = 32
+
 export function receiveJob(job: Job): void {
-  useKoharuStore.setState((state) => ({ jobs: { ...state.jobs, [job.id]: job } }))
+  useKoharuStore.setState((state) => {
+    const jobs = { ...state.jobs }
+    if (job.state === 'finished' || job.state === 'stopped') delete jobs[job.id]
+    else jobs[job.id] = job
+    if (job.state === 'running') return { jobs }
+    return { jobs, endedJobs: [...state.endedJobs, job.id].slice(-ENDED_JOB_LIMIT) }
+  })
 }
 
 export function receiveDownload(download: Download): void {

@@ -31,7 +31,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::{StageInput, StageProcessor, finish, generation};
+use super::{StageInput, StageLifecycle, finish, generation};
 use crate::{DetectionModel, ModelCell};
 
 const MODEL_ID: &str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152";
@@ -58,7 +58,7 @@ pub struct KoharuLayoutRFDetrSeg2XLConfig {
 }
 
 pub(super) struct Processor {
-    config: DetectionModel,
+    pub(super) config: DetectionModel,
     device: koharu_ml::Device,
     model: ModelCell<Model>,
 }
@@ -94,7 +94,7 @@ impl Processor {
 }
 
 #[async_trait]
-impl StageProcessor for Processor {
+impl StageLifecycle for Processor {
     fn model(&self) -> &'static str {
         MODEL_NAME
     }
@@ -122,8 +122,10 @@ impl StageProcessor for Processor {
             .ensure(|| Model::load(self.device.clone(), &self.config))
             .await
     }
+}
 
-    async fn process(&self, input: StageInput) -> Result<koharu_scene::Patch> {
+impl Processor {
+    pub(super) async fn process(&self, input: StageInput) -> Result<koharu_scene::Patch> {
         self.model
             .lock()
             .await
@@ -1846,7 +1848,7 @@ mod tests {
     use super::{
         DIALOGUE_MASK_CONTAINMENT_THRESHOLD, DetectedRegion, DetectedText, DetectionModel,
         ImageSize, KoharuLayoutRFDetrSeg2XLConfig, MaskPixel, PageRegions, Processor, RegionOutput,
-        StageInput, StageProcessor, closed_mask_for, color_palette, generation, infer_typography,
+        StageInput, StageLifecycle, closed_mask_for, color_palette, generation, infer_typography,
         layout_order, link_dialogue_regions, mask_containment, mask_for, mask_geometry,
         non_maximum_suppression, normalize_text_color, write_region,
     };

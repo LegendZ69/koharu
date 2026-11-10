@@ -16,9 +16,11 @@ import type {
   LanguageChoice,
   Model,
   ProviderPreference,
+  TranslationBatching,
   TranslationConfig as TranslationSettings,
 } from '@koharu/bridge/protocol'
 import { Badge } from '@koharu/ui/components/badge'
+import { NumberField, NumberFieldGroup, NumberFieldInput } from '@koharu/ui/components/number-field'
 import { Popover, PopoverContent, PopoverTrigger } from '@koharu/ui/components/popover'
 import {
   Select,
@@ -28,6 +30,8 @@ import {
   SelectValue,
 } from '@koharu/ui/components/select'
 import { Textarea } from '@koharu/ui/components/textarea'
+
+const batchingModes: readonly TranslationBatching[] = ['auto', 'all', 'halving', 'custom']
 
 export function TranslationPreferences({
   value,
@@ -59,6 +63,7 @@ export function TranslationPreferences({
     current.quantizations.find((quantization) => quantization.id === value.model.quantization) ??
     current.quantizations[0]
   const languageChoices = useMemo(() => orderedLanguageChoices(languages), [languages])
+  const batching = value.batching ?? 'auto'
   return (
     <PreferencePage
       title={t('settings.translation.title')}
@@ -114,6 +119,59 @@ export function TranslationPreferences({
         value={value.generation}
         onChange={(generation) => onChange({ ...value, generation })}
       />
+
+      <PreferenceSection
+        title={t('settings.translation.batching')}
+        description={t('settings.translation.batchingDescription')}
+      >
+        <PreferenceRow
+          title={t('settings.translation.batchingMode')}
+          description={t(`settings.translation.batchingModeDescriptions.${batching}`)}
+        >
+          <Select
+            value={batching}
+            items={Object.fromEntries(
+              batchingModes.map((mode) => [mode, t(`settings.translation.batchingModes.${mode}`)]),
+            )}
+            onValueChange={(mode) => mode && onChange({ ...value, batching: mode })}
+          >
+            <SelectTrigger
+              aria-label={t('settings.translation.batchingMode')}
+              className='h-8 w-full text-[11px]'
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {batchingModes.map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {t(`settings.translation.batchingModes.${mode}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </PreferenceRow>
+        {batching === 'custom' && (
+          <PreferenceRow title={t('settings.translation.pagesPerRequest')}>
+            <NumberField
+              min={1}
+              step={1}
+              value={value.pages_per_request ?? 4}
+              onValueChange={(pages) => {
+                if (pages !== null) {
+                  onChange({ ...value, pages_per_request: Math.max(1, Math.round(pages)) })
+                }
+              }}
+            >
+              <NumberFieldGroup className='h-8 rounded-lg'>
+                <NumberFieldInput
+                  aria-label={t('settings.translation.pagesPerRequest')}
+                  className='px-2.5 text-left'
+                />
+              </NumberFieldGroup>
+            </NumberField>
+          </PreferenceRow>
+        )}
+      </PreferenceSection>
 
       <PreferenceSection title={t('settings.translation.output')}>
         <PreferenceRow

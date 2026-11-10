@@ -9,6 +9,7 @@ import { usePages } from '@/lib/queries'
 import { useKoharuStore } from '@/lib/store'
 import { commands, type Download as DownloadState, type Job } from '@koharu/bridge/protocol'
 import { Button } from '@koharu/ui/components/button'
+import { ScrollArea } from '@koharu/ui/components/scroll-area'
 
 export function ActivityCenter() {
   const { t } = useTranslation()
@@ -23,9 +24,10 @@ export function ActivityCenter() {
   }).filter(
     (activity): activity is { id: number; label: string } => typeof activity.label === 'string',
   )
-  const visibleJobs = Object.values(jobs).filter(
-    (job) => job.state === 'running' || job.state === 'failed',
-  )
+  // Job ids are UUIDv7, so ordering by id lists jobs in the order they started.
+  const visibleJobs = Object.values(jobs)
+    .filter((job) => job.state === 'running' || job.state === 'failed')
+    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
   const runningDownloads = Object.values(downloads).filter(
     (download) => download.state === 'running',
   )
@@ -37,37 +39,39 @@ export function ActivityCenter() {
   return (
     <aside
       aria-label={t('activity.title')}
-      className='absolute right-3 bottom-9 z-30 flex w-72 max-w-[calc(100%-1.5rem)] flex-col rounded-2xl border border-border/50 bg-popover shadow-md'
+      className='absolute right-3 bottom-9 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl border border-border/50 bg-popover shadow-md'
     >
       <div className='border-b px-3 py-2'>
         <span className='text-[10px] font-semibold tracking-[0.1em] uppercase'>
           {t('activity.title')}
         </span>
       </div>
-      {activities.map((activity) => (
-        <div
-          key={activity.id}
-          role='status'
-          className='grid grid-cols-[1rem_minmax(0,1fr)] items-center gap-x-2.5 border-b p-3 last:border-b-0'
-        >
-          <LoaderCircle
-            className='size-3.5 animate-spin justify-self-center text-primary motion-reduce:animate-none'
-            aria-hidden='true'
-          />
-          <span className='truncate text-[12px] font-medium'>{t(activity.label)}</span>
-        </div>
-      ))}
-      {runningDownloads.length > 1 ? (
-        <DownloadGroup downloads={runningDownloads} />
-      ) : (
-        runningDownloads.map((download) => <DownloadItem key={download.id} download={download} />)
-      )}
-      {failedDownloads.map((download) => (
-        <DownloadItem key={download.id} download={download} />
-      ))}
-      {visibleJobs.map((job) => (
-        <JobItem key={job.id} job={job} />
-      ))}
+      <ScrollArea className='flex min-h-0 flex-col'>
+        {activities.map((activity) => (
+          <div
+            key={activity.id}
+            role='status'
+            className='grid grid-cols-[1rem_minmax(0,1fr)] items-center gap-x-2.5 border-b p-3 last:border-b-0'
+          >
+            <LoaderCircle
+              className='size-3.5 animate-spin justify-self-center text-primary motion-reduce:animate-none'
+              aria-hidden='true'
+            />
+            <span className='truncate text-[12px] font-medium'>{t(activity.label)}</span>
+          </div>
+        ))}
+        {runningDownloads.length > 1 ? (
+          <DownloadGroup downloads={runningDownloads} />
+        ) : (
+          runningDownloads.map((download) => <DownloadItem key={download.id} download={download} />)
+        )}
+        {failedDownloads.map((download) => (
+          <DownloadItem key={download.id} download={download} />
+        ))}
+        {visibleJobs.map((job) => (
+          <JobItem key={job.id} job={job} />
+        ))}
+      </ScrollArea>
     </aside>
   )
 }

@@ -31,7 +31,7 @@ flowchart TB
 | `crates/koharu`   | Startup, diagnostics, Tauri configuration, and build integration                                                   |
 | `koharu-app`      | Tauri state, project lifecycle, command serialization, jobs, synchronization, and Agent hosting                    |
 
-Independent typed channels carry project, canvas, job, download, and resource updates; Agent sign-in and runs stream through per-call channels. Preferences are fetched and saved through commands. The frontend does not use an HTTP client or a generic application event envelope.
+Each window subscribes to independent typed channels for project, canvas, job, download, resource, and preferences updates; Agent sign-in and runs stream through per-call channels. Preferences are fetched and saved through commands, and a save reaches the other windows through their preferences channel. The frontend does not use an HTTP client or a generic application event envelope.
 
 <Note>
   Rust signatures generate `packages/bridge/src/protocol.ts`. Change the Rust source and [regenerate

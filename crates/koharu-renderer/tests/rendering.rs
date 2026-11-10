@@ -139,7 +139,7 @@ async fn discarded_image_nodes_are_rebuilt_for_a_reopened_presentation() {
     let renderer = Renderer::new().unwrap();
 
     renderer.render(&snapshot, page).await.unwrap();
-    renderer.discard_retained_nodes();
+    renderer.discard_retained_nodes(snapshot.project_id());
     let reopened = renderer.render(&snapshot, page).await.unwrap();
     let raster = Rasterizer::new()
         .unwrap()

@@ -2,6 +2,7 @@
 
 import { QueryClientProvider } from '@tanstack/react-query'
 import { Channel } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useEffect, useRef, type ReactNode } from 'react'
 import { I18nextProvider } from 'react-i18next'
 
@@ -14,6 +15,7 @@ import { pageKey, pagesKey, projectKey, queryClient, refresh } from '@/lib/queri
 import {
   receiveCanvas,
   receiveDownload,
+  receivePreferences,
   receiveStartupState,
   receiveJob,
   receiveResources,
@@ -25,6 +27,7 @@ import {
   type Download,
   type Job,
   type ModelResources,
+  type Preferences,
   type ProjectInfo,
 } from '@koharu/bridge/protocol'
 import { Toaster } from '@koharu/ui/components/toast'
@@ -51,7 +54,8 @@ export function Providers({ children }: { children: ReactNode }) {
           channel<CanvasState>(receiveCanvas),
           channel<Job>((job) => {
             const previous = completed.get(job.id) ?? 0
-            completed.set(job.id, job.completed)
+            if (job.state === 'running') completed.set(job.id, job.completed)
+            else completed.delete(job.id)
             receiveJob(job)
             if (job.completed > previous || job.state !== 'running') {
               void refresh(projectKey, pagesKey, pageKey).catch(() => undefined)
@@ -74,6 +78,7 @@ export function Providers({ children }: { children: ReactNode }) {
               queryClient.setQueryData(pageKey, null)
             }
           }),
+          channel<Preferences>(receivePreferences),
         )
         .then((state) => {
           if (lifecycle.active) receiveStartupState(state)
@@ -124,7 +129,8 @@ function StartupBoundary({ children }: { children: ReactNode }) {
   return initialized ? (
     <>
       {children}
-      <Updater />
+      {/* An update replaces the whole app, so only the startup window checks for one. */}
+      {getCurrentWindow().label === 'main' && <Updater />}
     </>
   ) : (
     <StartupView />

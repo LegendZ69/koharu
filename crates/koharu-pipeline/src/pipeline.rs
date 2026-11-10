@@ -7,14 +7,14 @@ use koharu_scene::Snapshot;
 
 use crate::{
     Committer, PipelineConfig, PipelineError, Report, Request, ResourceSnapshot,
-    execution::Execution, resources::ResourceMonitor, stage_runner::StageRunner,
+    admission::Admission, execution::Execution, resources::ResourceMonitor,
+    stage_runner::StageRunner,
 };
 
 #[derive(Clone)]
 pub struct Pipeline {
     current: Arc<ArcSwap<StageRunner>>,
     resources: Arc<ResourceMonitor>,
-    execution: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Pipeline {
@@ -34,24 +34,26 @@ impl Pipeline {
     ) -> Result<Self> {
         let translator = koharu_translator::Translator::from_config(device.clone(), providers)?;
         let resources = ResourceMonitor::new(&device);
+        let admission = Arc::new(Admission::new(&device, resources.clone()));
         let runner = {
             let value = config.read()?;
-            StageRunner::new(&value, translator.clone(), &device, resources.clone())?
+            StageRunner::new(&value, translator.clone(), &device, admission.clone(), None)?
         };
         let current = Arc::new(ArcSwap::from_pointee(runner));
         let watched = current.clone();
-        let watched_resources = resources.clone();
         let _watcher = tokio::runtime::Handle::try_current()
             .context("pipeline requires a Tokio runtime")?
             .spawn(async move {
                 let mut changes = config.subscribe();
                 while changes.changed().await.is_ok() {
+                    let previous = watched.load_full();
                     let runner = config.read().and_then(|value| {
                         StageRunner::new(
                             &value,
                             translator.clone(),
                             &device,
-                            watched_resources.clone(),
+                            admission.clone(),
+                            Some(&previous),
                         )
                     });
                     match runner {
@@ -60,11 +62,7 @@ impl Pipeline {
                     }
                 }
             });
-        Ok(Self {
-            current,
-            resources,
-            execution: Arc::new(tokio::sync::Mutex::new(())),
-        })
+        Ok(Self { current, resources })
     }
 
     pub fn subscribe_resources(&self) -> tokio::sync::watch::Receiver<ResourceSnapshot> {
@@ -72,6 +70,8 @@ impl Pipeline {
         self.resources.subscribe()
     }
 
+    /// Several requests may run at once, also on one project. At most one job per stage runs at
+    /// a time across all of them, and a page is processed by one run of its project at a time.
     #[tracing::instrument(skip_all)]
     pub async fn execute(
         &self,
@@ -79,14 +79,14 @@ impl Pipeline {
         request: Request,
         committer: &mut dyn Committer,
     ) -> std::result::Result<Report, PipelineError> {
-        let _execution = self.execution.lock().await;
         Execution::new(
             self.current.load_full(),
             self.resources.clone(),
             snapshot,
             request,
             committer,
-        )?
+        )
+        .await?
         .run()
         .await
     }

@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::{Stage, resources::ResourceMonitor, stages::Stages};
+use crate::resources::ResourceMonitor;
 
 pub(crate) struct AcceleratorGate {
     resources: Arc<ResourceMonitor>,
@@ -36,12 +36,14 @@ impl AcceleratorGate {
         )
     }
 
-    pub(crate) async fn recover(&self, stage: Stage, stages: &Stages) -> AcceleratorPermit {
+    /// Takes the lane back after an out-of-memory failure and runs `unload` while holding it;
+    /// once that freed a model, waits for a fresh resource sample.
+    pub(crate) async fn recover(&self, unload: impl FnOnce() -> bool) -> AcceleratorPermit {
         let permit = self.acquire().await;
         if self.lane.is_none() {
             return permit;
         }
-        if unload_other_models(stage, stages) {
+        if unload() {
             let mut changed = self.resources.subscribe();
             let _ = tokio::time::timeout(Duration::from_millis(600), changed.changed()).await;
         }
@@ -57,15 +59,4 @@ impl AcceleratorPermit {
     fn cpu() -> Self {
         Self { _lane: None }
     }
-}
-
-fn unload_other_models(requested: Stage, stages: &Stages) -> bool {
-    let mut unloaded = false;
-    for stage in Stage::ALL {
-        if stage != requested && stages.unload(stage) {
-            unloaded = true;
-            tracing::debug!(%stage, "unloaded model while recovering from memory pressure");
-        }
-    }
-    unloaded
 }

@@ -32,7 +32,7 @@ import {
   queryClient,
   useCommand,
 } from '@/lib/queries'
-import { useKoharuStore } from '@/lib/store'
+import { receivePreferences, useKoharuStore } from '@/lib/store'
 import * as canvasRuntime from '@koharu/bridge/canvas'
 import {
   commands,
@@ -44,6 +44,7 @@ import {
 import { TooltipProvider } from '@koharu/ui/components/tooltip'
 
 const nativeWindow = vi.hoisted(() => ({
+  label: 'main',
   close: vi.fn(async () => undefined),
   isMaximized: vi.fn(async () => false),
   minimize: vi.fn(async () => undefined),
@@ -420,6 +421,16 @@ describe('greenfield editor', () => {
     },
   )
 
+  it('opens an empty window from the File menu', async () => {
+    const user = userEvent.setup()
+    const openWindow = vi.spyOn(commands, 'openWindow').mockResolvedValue(null)
+    render(<TitleBar />)
+
+    await user.click(screen.getByRole('menuitem', { name: 'File' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'New Window' }))
+    expect(openWindow).toHaveBeenCalledExactlyOnceWith(null)
+  })
+
   it('opens community links through the Tauri opener plugin', async () => {
     nativeOpenUrl.mockClear()
     const user = userEvent.setup()
@@ -432,6 +443,24 @@ describe('greenfield editor', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Help' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'GitHub' }))
     expect(nativeOpenUrl).toHaveBeenLastCalledWith('https://github.com/koharu-rs/koharu')
+  })
+
+  it('applies the chosen canvas fit from the View menu, even when it is already checked', async () => {
+    const user = userEvent.setup()
+    installProject()
+    render(<TitleBar />)
+
+    await user.click(screen.getByRole('menuitem', { name: 'View' }))
+    expect(await screen.findByRole('menuitemradio', { name: /Fit Window/ })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    )
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Fit Width/ }))
+    expect(useKoharuStore.getState()).toMatchObject({ fitMode: 'width', fitCanvasRequest: 1 })
+
+    await user.click(screen.getByRole('menuitem', { name: 'View' }))
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: /Fit Width/ }))
+    expect(useKoharuStore.getState()).toMatchObject({ fitMode: 'width', fitCanvasRequest: 2 })
   })
 
   it('shows the current version and author in About', async () => {
@@ -589,6 +618,38 @@ describe('greenfield editor', () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
     expect(selectPage).toHaveBeenCalledWith('page-2')
+  })
+
+  it('presents a cached page with the sticky fit and keeps the camera for an uncached one', () => {
+    installProject()
+    queryClient.setQueryData(pagesKey, [
+      ...(queryClient.getQueryData<PageSummary[]>(pagesKey) ?? []),
+      {
+        id: 'page-2',
+        label: 'Page 2',
+        size: { width: 1000, height: 3000 },
+        source_asset: null,
+        layer_count: 0,
+      },
+    ])
+    const camera = { zoom: 2, translation: [-50, -60] as [number, number], fit: null }
+    useKoharuStore.setState({ camera, canvasViewport: [800, 600], fitMode: 'width' })
+    const presented: unknown[] = []
+    vi.spyOn(canvasRuntime, 'showCanvasPage').mockImplementation(() => {
+      presented.push(useKoharuStore.getState().camera)
+      return presented.length > 1
+    })
+    vi.spyOn(commands, 'selectPage').mockReturnValue(new Promise<never>(() => undefined))
+    vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1)
+    render(<PageRail />)
+    const item = screen.getByText('Page 2').closest('article')!
+
+    fireEvent.click(item)
+    expect(useKoharuStore.getState().camera).toBe(camera)
+
+    fireEvent.click(item)
+    expect(presented[1]).toEqual({ zoom: 0.72, translation: [64, 16], fit: 'width' })
+    expect(useKoharuStore.getState().camera).toBe(presented[1])
   })
 
   it('prefetches an inactive page on pointer intent and caches its preparation', async () => {
@@ -994,13 +1055,13 @@ describe('greenfield editor', () => {
 
   it('shows zoom before page size without a fit control', () => {
     installProject()
-    useKoharuStore.setState({ camera: { zoom: 1.25, translation: [0, 0], fitted: false } })
+    useKoharuStore.setState({ camera: { zoom: 1.25, translation: [0, 0], fit: null } })
     render(<StatusBar onZoomChange={vi.fn()} />)
 
     const zoom = screen.getByText('125%')
     const size = screen.getByText('1000 × 1500 px')
     expect(zoom.compareDocumentPosition(size) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
-    expect(screen.queryByRole('button', { name: 'Fit window' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Fit/ })).not.toBeInTheDocument()
   })
 
   it('changes the pipeline scope and selected stages from the runtime selector', async () => {
@@ -1062,6 +1123,33 @@ describe('greenfield editor', () => {
     expect(screen.getByRole('button', { name: /Output English/ })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
     expect(useKoharuStore.getState().settingsOpen).toBe(true)
+  })
+
+  it('starts another run while a job is running', async () => {
+    installProject()
+    useKoharuStore.setState({
+      jobs: {
+        job: {
+          state: 'running',
+          id: 'job',
+          completed: 1,
+          total: 4,
+          page: 'page',
+          stage: 'ocr',
+          model: 'manga-ocr',
+          error: null,
+        },
+      },
+    })
+    const run = vi.spyOn(commands, 'process').mockResolvedValue('next')
+    render(<CanvasCommandBar />)
+
+    const button = screen.getByRole('button', { name: 'Run processing' })
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+    fireEvent.click(button)
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(2))
+    expect(screen.queryByRole('button', { name: /Stop/ })).not.toBeInTheDocument()
   })
 
   it('configures translation output from the runtime selector', async () => {
@@ -1580,6 +1668,98 @@ describe('greenfield editor', () => {
     )
   })
 
+  it('saves the translation batching mode and a custom page count', async () => {
+    installProject()
+    const user = userEvent.setup()
+    useKoharuStore.setState({ settingsOpen: true })
+    const save = vi
+      .spyOn(commands, 'savePreferences')
+      .mockImplementation(async (pipeline, providers, typesetting) => ({
+        ...preferences,
+        pipeline,
+        providers,
+        typesetting,
+      }))
+    render(
+      <ThemeProvider attribute='class'>
+        <SettingsPage />
+      </ThemeProvider>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Translation' }))
+    const mode = screen.getByRole('combobox', { name: 'Batching mode' })
+    expect(mode).toHaveTextContent('Auto')
+    expect(screen.queryByRole('textbox', { name: 'Pages per request' })).not.toBeInTheDocument()
+    await user.click(mode)
+    await user.click(await screen.findByRole('option', { name: 'Custom' }))
+    await waitFor(() =>
+      expect(save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          translation: expect.objectContaining({ batching: 'custom' }),
+        }),
+        preferences.providers,
+        preferences.typesetting,
+      ),
+    )
+
+    const pages = screen.getByRole('textbox', { name: 'Pages per request' })
+    expect(pages).toHaveValue('4')
+    await user.clear(pages)
+    await user.type(pages, '6')
+    await waitFor(() =>
+      expect(save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          translation: expect.objectContaining({ batching: 'custom', pages_per_request: 6 }),
+        }),
+        preferences.providers,
+        preferences.typesetting,
+      ),
+    )
+  })
+
+  it('keeps unsaved settings edits when another window saves preferences', async () => {
+    installProject()
+    useKoharuStore.setState({ settingsOpen: true })
+    const save = vi
+      .spyOn(commands, 'savePreferences')
+      .mockImplementation(async (pipeline, providers, typesetting) => ({
+        ...preferences,
+        pipeline,
+        providers,
+        typesetting,
+      }))
+    const savedElsewhere = (instructions: string): Preferences => ({
+      ...preferences,
+      pipeline: {
+        ...preferences.pipeline,
+        translation: { ...preferences.pipeline.translation, instructions },
+      },
+    })
+    render(
+      <ThemeProvider attribute='class'>
+        <SettingsPage />
+      </ThemeProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Translation' }))
+    const instructions = screen.getByLabelText('Translation instructions')
+
+    act(() => receivePreferences(savedElsewhere('Saved in another window.')))
+    expect(instructions).toHaveValue('Saved in another window.')
+
+    fireEvent.change(instructions, { target: { value: 'Typed here.' } })
+    act(() => receivePreferences(savedElsewhere('Saved there again.')))
+    expect(instructions).toHaveValue('Typed here.')
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          translation: expect.objectContaining({ instructions: 'Typed here.' }),
+        }),
+        preferences.providers,
+        preferences.typesetting,
+      ),
+    )
+  })
+
   it('saves a newer OpenRouter selection after an in-flight provider save', async () => {
     installProject()
     const user = userEvent.setup()
@@ -1828,6 +2008,38 @@ describe('greenfield editor', () => {
     expect(screen.getByText('manga-ocr')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
     await waitFor(() => expect(stop).toHaveBeenCalledWith('job'))
+  })
+
+  it('lists concurrent jobs in the order they started, each with its own Stop', async () => {
+    installProject()
+    const first = '01933f6e-a000-7000-8000-000000000001'
+    const second = '01933f6e-a000-7000-8000-000000000002'
+    const job = (id: string, stage: 'ocr' | 'translation') =>
+      ({
+        state: 'running',
+        id,
+        completed: 0,
+        total: 4,
+        page: 'page',
+        stage,
+        model: null,
+        error: null,
+      }) as const
+    useKoharuStore.setState({
+      jobs: { [second]: job(second, 'translation'), [first]: job(first, 'ocr') },
+    })
+    const stop = vi.spyOn(commands, 'stopJob').mockResolvedValue(null)
+    render(<ActivityCenter />)
+
+    expect(screen.getAllByText(/^(OCR|Translation)$/).map((title) => title.textContent)).toEqual([
+      'OCR',
+      'Translation',
+    ])
+    const stops = screen.getAllByRole('button', { name: 'Stop' })
+    expect(stops).toHaveLength(2)
+    fireEvent.click(stops[1]!)
+    await waitFor(() => expect(stop).toHaveBeenCalledWith(second))
+    expect(stop).toHaveBeenCalledOnce()
   })
 
   it('combines concurrent downloads into one progress bar', () => {

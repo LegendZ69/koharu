@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "시작할 페이지를 선택하세요.",
     "fit": "창에 맞춤",
+    "fitWidth": "너비에 맞춤",
     "surface": "Koharu 캔버스",
     "unavailable": "WebGPU 캔버스를 사용할 수 없습니다"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}}단계",
     "stageCount_one": "{{count}}단계",
     "stageCount_other": "{{count}}단계",
-    "stages": "단계",
-    "stop": "중지",
-    "stopProcessing": "처리 중지"
+    "stages": "단계"
   },
   "inspector": {
     "alignBottom": "아래 정렬",
@@ -252,9 +251,11 @@
     "export": "프로젝트 내보내기",
     "file": "파일",
     "fit": "창에 맞춤",
+    "fitWidth": "너비에 맞춤",
     "github": "GitHub",
     "help": "도움말",
     "import": "페이지 가져오기",
+    "newWindow": "새 창",
     "process": "처리",
     "processLayers": "선택한 레이어 처리",
     "processPages": "선택한 페이지 처리",
@@ -366,7 +367,7 @@
       "description": "언어 모델이 번역문을 생성하는 방식을 조정합니다.",
       "enableReasoning": "추론 활성화",
       "frequencyPenalty": "빈도 페널티",
-      "maxTokens": "최대 토큰",
+      "maxTokens": "페이지당 최대 토큰",
       "minP": "최소 P",
       "presencePenalty": "존재 페널티",
       "repeatPenalty": "반복 페널티",
@@ -436,6 +437,21 @@
     },
     "title": "설정",
     "translation": {
+      "batching": "일괄 처리",
+      "batchingDescription": "페이지를 번역 요청으로 묶는 방식을 선택합니다.",
+      "batchingMode": "일괄 처리 방식",
+      "batchingModeDescriptions": {
+        "all": "모든 페이지를 한 번의 요청으로 보냅니다.",
+        "auto": "모델의 컨텍스트 창에 맞게 페이지를 묶고, 여전히 너무 큰 요청은 나눕니다.",
+        "custom": "요청마다 정해진 수의 페이지를 보냅니다.",
+        "halving": "모든 페이지를 한 번의 요청으로 보내고, 너무 큰 요청은 한 페이지가 될 때까지 절반으로 나눕니다."
+      },
+      "batchingModes": {
+        "all": "모든 페이지",
+        "auto": "자동",
+        "custom": "사용자 지정",
+        "halving": "절반 분할"
+      },
       "description": "설정된 제공자의 모델을 선택하고 공통 번역 및 생성 옵션을 적용합니다.",
       "instructionsDescription": "이름, 어조, 용어 또는 서식 지침입니다.",
       "instructionsLabel": "번역 지침",
@@ -444,6 +460,7 @@
       "modelDescription": "제공자 레이블은 각 모델의 실행 위치를 나타내며 연결은 별도로 설정합니다.",
       "modelQuantization": "모델 양자화",
       "output": "출력",
+      "pagesPerRequest": "요청당 페이지 수",
       "quantization": "양자화",
       "quantizationDescription": "작은 형식은 메모리를 덜 사용하지만 일반적으로 품질이 낮아질 수 있습니다.",
       "selectQuantization": "양자화 선택",
@@ -479,6 +496,8 @@
     "loadingProjects": "프로젝트 불러오는 중…",
     "newDescription": "페이지, 번역 및 내보내기를 위한 새 작업 공간을 만드세요.",
     "newProject": "새 프로젝트",
+    "openInNewWindow": "새 창에서 열기",
+    "openInNewWindowLabel": "새 창에서 {{name}} 열기",
     "projectKind": "Koharu 프로젝트",
     "projectList": "프로젝트",
     "projectName": "프로젝트 이름",

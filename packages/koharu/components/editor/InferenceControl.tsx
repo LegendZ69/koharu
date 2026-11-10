@@ -9,23 +9,16 @@ import {
   Play,
   Settings,
   Sparkles,
-  Square,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ModelPicker } from '@/components/controls/ModelPicker'
 import { OutputPicker, type OutputDraft } from '@/components/controls/OutputPicker'
-import { call, refreshTranslationModels, savePreferences } from '@/lib/backend'
+import { refreshTranslationModels, savePreferences } from '@/lib/backend'
 import { pipelineStages, receivePreferences, useKoharuStore, type PipelineScope } from '@/lib/store'
 import { modelKey, providerName } from '@/lib/translation'
-import {
-  commands,
-  type Model,
-  type ModelSelection,
-  type ProviderPreference,
-  type Stage,
-} from '@koharu/bridge/protocol'
+import type { Model, ModelSelection, ProviderPreference, Stage } from '@koharu/bridge/protocol'
 import { Button } from '@koharu/ui/components/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@koharu/ui/components/popover'
 import { cn } from '@koharu/ui/lib/utils'
@@ -44,23 +37,20 @@ export function InferenceControl({
   const stages = useKoharuStore((state) => state.processingStages)
   const setScope = useKoharuStore((state) => state.setProcessingScope)
   const setStages = useKoharuStore((state) => state.setProcessingStages)
-  const jobs = useKoharuStore((state) => state.jobs)
+  const running = useKoharuStore((state) =>
+    Object.values(state.jobs).some((job) => job.state === 'running'),
+  )
   const selectedPages = useKoharuStore((state) => state.selectedPages)
-  const running = Object.values(jobs).find((job) => job.state === 'running') ?? null
   const unavailable = scope === 'selected-pages' && selectedPages.length === 0
 
-  const stop = () => {
-    if (!running) return
-    void call(commands.stopJob, running.id).catch(() => undefined)
-  }
-
+  // Run always starts another job; each job is stopped from the activity center.
   return (
     <div className='flex items-center gap-1'>
       <RuntimeSelector
         scope={scope}
         stages={stages}
         selectionCount={selectedPages.length}
-        running={Boolean(running)}
+        running={running}
         onScopeChange={setScope}
         onStagesChange={setStages}
       />
@@ -68,16 +58,13 @@ export function InferenceControl({
       <Button
         type='button'
         size='sm'
-        className={cn(
-          'rounded-lg px-2.5 text-[11px]',
-          !running && 'bg-primary/80 hover:bg-primary/90',
-        )}
-        disabled={(disabled || unavailable) && !running}
-        aria-label={running ? t('inference.stopProcessing') : t('inference.runProcessing')}
-        onClick={running ? stop : () => onRun(scope, stages)}
+        className='rounded-lg bg-primary/80 px-2.5 text-[11px] hover:bg-primary/90'
+        disabled={disabled || unavailable}
+        aria-label={t('inference.runProcessing')}
+        onClick={() => onRun(scope, stages)}
       >
-        {running ? <Square className='size-3 fill-current' /> : <Play className='size-3' />}
-        <span>{running ? t('inference.stop') : t('inference.run')}</span>
+        <Play className='size-3' />
+        <span>{t('inference.run')}</span>
       </Button>
     </div>
   )
@@ -260,7 +247,6 @@ function RuntimeSelector({
             models={choices}
             providers={providers}
             loading={loadingModels}
-            disabled={running}
             busyModel={savingModel}
             onBack={() => setView('root')}
             onSelect={chooseModel}
@@ -336,7 +322,6 @@ function RuntimeSelector({
             targetLanguage={translation.target_language}
             instructions={translation.instructions}
             languages={languages}
-            disabled={running}
             saving={savingOutput}
             onBack={() => setView('root')}
             onChange={saveOutput}

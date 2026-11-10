@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "請選擇頁面以開始。",
     "fit": "適應視窗",
+    "fitWidth": "適應寬度",
     "surface": "Koharu 畫布",
     "unavailable": "WebGPU 畫布無法使用"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}} 個階段",
     "stageCount_one": "{{count}} 個階段",
     "stageCount_other": "{{count}} 個階段",
-    "stages": "階段",
-    "stop": "停止",
-    "stopProcessing": "停止處理"
+    "stages": "階段"
   },
   "inspector": {
     "alignBottom": "底端對齊",
@@ -252,9 +251,11 @@
     "export": "匯出專案",
     "file": "檔案",
     "fit": "適應視窗",
+    "fitWidth": "適應寬度",
     "github": "GitHub",
     "help": "說明",
     "import": "匯入頁面",
+    "newWindow": "開新視窗",
     "process": "處理",
     "processLayers": "處理所選圖層",
     "processPages": "處理所選頁面",
@@ -366,7 +367,7 @@
       "description": "微調語言模型產生譯文的方式。",
       "enableReasoning": "啟用推理",
       "frequencyPenalty": "頻率懲罰",
-      "maxTokens": "最大權杖數",
+      "maxTokens": "每頁最大權杖數",
       "minP": "最小 P",
       "presencePenalty": "存在懲罰",
       "repeatPenalty": "重複懲罰",
@@ -436,6 +437,21 @@
     },
     "title": "設定",
     "translation": {
+      "batching": "批次處理",
+      "batchingDescription": "選擇如何將頁面分組到翻譯請求中。",
+      "batchingMode": "批次模式",
+      "batchingModeDescriptions": {
+        "all": "在一個請求中傳送所有頁面。",
+        "auto": "依模型的上下文視窗將頁面分組，並拆分仍然過大的請求。",
+        "custom": "每個請求傳送固定數量的頁面。",
+        "halving": "在一個請求中傳送所有頁面；請求過大時對半拆分，直到單一頁面。"
+      },
+      "batchingModes": {
+        "all": "所有頁面",
+        "auto": "自動",
+        "custom": "自訂",
+        "halving": "對半拆分"
+      },
       "description": "選擇任一已設定提供者的模型，然後套用一組共用的翻譯和產生選項。",
       "instructionsDescription": "關於名稱、語氣、術語或格式的說明。",
       "instructionsLabel": "翻譯說明",
@@ -444,6 +460,7 @@
       "modelDescription": "提供者標籤表示各模型的執行位置；連線需另行設定。",
       "modelQuantization": "模型量化",
       "output": "輸出",
+      "pagesPerRequest": "每個請求的頁數",
       "quantization": "量化",
       "quantizationDescription": "較小的格式使用較少記憶體，但通常會犧牲一些品質。",
       "selectQuantization": "選擇量化方式",
@@ -479,6 +496,8 @@
     "loadingProjects": "正在載入專案…",
     "newDescription": "為頁面、翻譯和匯出建立乾淨的工作區。",
     "newProject": "新建專案",
+    "openInNewWindow": "在新視窗中開啟",
+    "openInNewWindowLabel": "在新視窗中開啟 {{name}}",
     "projectKind": "Koharu 專案",
     "projectList": "專案",
     "projectName": "專案名稱",

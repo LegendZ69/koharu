@@ -90,9 +90,10 @@ async fn main() -> Result<()> {
     if let Some(instructions) = args.instructions {
         request = request.with_instructions(instructions);
     }
-    let (_, translated) = translator
+    let translated = translator
         .translate(&selection, GenerationConfig::default(), request)
-        .await?;
+        .await?
+        .segments;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&translated)?);

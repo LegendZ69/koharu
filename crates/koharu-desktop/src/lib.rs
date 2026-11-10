@@ -5,7 +5,7 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 use anyhow::{Context as _, Result, bail};
 use koharu_rasterizer::{Rasterizer, ResourceId};
 use koharu_renderer::{Frame as RenderedFrame, LayerKind, Renderer};
-use koharu_scene::{Commit, EntityId, Geometry, Point, Revision, Snapshot};
+use koharu_scene::{Commit, EntityId, Geometry, Point, ProjectId, Revision, Snapshot};
 use parking_lot::{Mutex as SyncMutex, RwLock};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -50,7 +50,36 @@ pub struct CanvasState {
 struct PresentationState {
     generation: u64,
     frame: Option<RenderedFrame>,
-    requested_preparation: u64,
+    requested_presentation: u64,
+    requested_prefetch: u64,
+    claimed: Option<(ProjectId, Revision)>,
+}
+
+/// Where a presentation request sits in the order of its project's state.
+#[derive(Clone, Copy)]
+enum Claim {
+    /// A project the window just opened; it supersedes everything presented before.
+    Project(ProjectId, Revision),
+    /// State observed after its revision was committed, such as a page selection.
+    Selection(ProjectId, Revision),
+    /// The commit that created a revision, which is the earliest state at that revision.
+    Commit(ProjectId, Revision),
+    Clear,
+}
+
+#[derive(Clone, Copy)]
+struct Ticket {
+    presentation: u64,
+    prefetch: Option<u64>,
+}
+
+impl Ticket {
+    fn is_current(self, state: &PresentationState) -> bool {
+        state.requested_presentation == self.presentation
+            && self
+                .prefetch
+                .is_none_or(|prefetch| state.requested_prefetch == prefetch)
+    }
 }
 
 const MAX_CACHED_PAGE_FRAMES: usize = 8;
@@ -68,13 +97,10 @@ struct CachedPageFrame {
     last_used: u64,
 }
 
+/// Rendering resources shared by every window.
 pub struct Desktop {
     renderer: Renderer,
     rasterizer: OnceCell<Arc<Rasterizer>>,
-    presentation: RwLock<PresentationState>,
-    page_frames: SyncMutex<PageFrameCache>,
-    preparation: Mutex<()>,
-    preparation_changed: Notify,
 }
 
 impl Desktop {
@@ -82,10 +108,6 @@ impl Desktop {
         Ok(Self {
             renderer: Renderer::new()?,
             rasterizer: OnceCell::new(),
-            presentation: RwLock::new(PresentationState::default()),
-            page_frames: SyncMutex::new(PageFrameCache::default()),
-            preparation: Mutex::new(()),
-            preparation_changed: Notify::new(),
         })
     }
 
@@ -104,6 +126,35 @@ impl Desktop {
             .cloned()
     }
 
+    /// Creates one window's presentation over the shared renderer.
+    #[must_use]
+    pub fn presentation(&self) -> Presentation {
+        Presentation {
+            renderer: self.renderer.clone(),
+            state: RwLock::new(PresentationState::default()),
+            page_frames: SyncMutex::new(PageFrameCache::default()),
+            preparation: Mutex::new(()),
+            preparation_changed: Notify::new(),
+        }
+    }
+}
+
+/// One window's presented frame, frame generation, and prepared page frames.
+///
+/// Callers read project state under their project lock and present it after releasing that
+/// lock, so requests can arrive out of order. A presentation is bound to one project at a time
+/// and orders that project's requests by revision: revisions only grow, and the commit that
+/// creates a revision is the earliest state at it. A request for older state is rejected before
+/// it can supersede newer work, and a prefetch never supersedes a presentation request.
+pub struct Presentation {
+    renderer: Renderer,
+    state: RwLock<PresentationState>,
+    page_frames: SyncMutex<PageFrameCache>,
+    preparation: Mutex<()>,
+    preparation_changed: Notify,
+}
+
+impl Presentation {
     pub fn frame_manifest_bytes(&self, generation: u64) -> Result<Vec<u8>> {
         let frame = self.frame_at_generation(generation)?;
         frame.prepared().manifest()?.encode().map_err(Into::into)
@@ -118,9 +169,11 @@ impl Desktop {
     }
 
     pub async fn prepare_page(&self, snapshot: &Snapshot, page: EntityId) -> Result<bool> {
-        let request = self.request_preparation();
+        let Some(request) = self.claim_prefetch(snapshot.project_id(), snapshot.revision()) else {
+            return Ok(false);
+        };
         let _preparation = self.preparation.lock().await;
-        if !self.is_current_preparation(request) {
+        if !self.is_current(request) {
             return Ok(false);
         }
         let revision = snapshot.revision();
@@ -135,7 +188,7 @@ impl Desktop {
             return Ok(false);
         };
         let frame = frame?;
-        if !self.is_current_preparation(request) {
+        if !self.is_current(request) {
             return Ok(false);
         }
         self.page_frames.lock().insert(frame);
@@ -164,7 +217,7 @@ impl Desktop {
     }
 
     fn frame_at_generation(&self, generation: u64) -> Result<RenderedFrame> {
-        let presentation = self.presentation.read();
+        let presentation = self.state.read();
         if presentation.generation != generation {
             bail!(
                 "canvas generation {generation} is stale; current generation is {}",
@@ -185,9 +238,18 @@ impl Desktop {
             .with_context(|| format!("canvas page {page} at revision {revision} is not prepared"))
     }
 
+    /// Whether this presentation is bound to `project`.
+    #[must_use]
+    pub fn presents(&self, project: ProjectId) -> bool {
+        self.state
+            .read()
+            .claimed
+            .is_some_and(|(claimed, _)| claimed == project)
+    }
+
     #[must_use]
     pub fn canvas_state(&self) -> CanvasState {
-        let presentation = self.presentation.read();
+        let presentation = self.state.read();
         let Some(frame) = presentation.frame.as_ref() else {
             return CanvasState {
                 page: None,
@@ -234,7 +296,7 @@ impl Desktop {
         expected_revision: Revision,
         elements: &[TransformFrame],
     ) -> Result<Vec<(EntityId, Geometry, f32)>> {
-        let presentation = self.presentation.read();
+        let presentation = self.state.read();
         let rendered = presentation
             .frame
             .as_ref()
@@ -306,13 +368,16 @@ impl Desktop {
         page: Option<EntityId>,
         commit: &Commit,
     ) -> Result<bool> {
-        let request = self.request_preparation();
+        let Some(request) = self.claim(Claim::Commit(snapshot.project_id(), snapshot.revision()))
+        else {
+            return Ok(false);
+        };
         let _preparation = self.preparation.lock().await;
-        if !self.is_current_preparation(request) {
+        if !self.is_current(request) {
             return Ok(false);
         }
         let (current_page, revision, previous) = {
-            let presentation = self.presentation.read();
+            let presentation = self.state.read();
             let frame = presentation.frame.as_ref();
             (
                 frame.map(RenderedFrame::page),
@@ -327,9 +392,7 @@ impl Desktop {
             return Ok(false);
         }
         let Some(page) = page else {
-            if self.replace_frame_if_current(request, None) {
-                self.renderer.discard_retained_nodes();
-            }
+            self.replace_frame_if_current(request, None);
             return Ok(false);
         };
         let rendered = if commit.revision == snapshot.revision()
@@ -355,42 +418,56 @@ impl Desktop {
         Ok(true)
     }
 
+    /// Presents a project the window just opened in place of whatever it presented before.
+    #[tracing::instrument(skip_all)]
+    pub async fn show_project(&self, snapshot: &Snapshot, page: Option<EntityId>) -> Result<bool> {
+        let Some(request) = self.claim(Claim::Project(snapshot.project_id(), snapshot.revision()))
+        else {
+            return Ok(false);
+        };
+        let _preparation = self.preparation.lock().await;
+        if !self.is_current(request) {
+            return Ok(false);
+        }
+        self.show_page_locked(snapshot, page, request).await
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn show_page(&self, snapshot: &Snapshot, page: Option<EntityId>) -> Result<bool> {
-        let request = self.request_preparation();
+        let Some(request) =
+            self.claim(Claim::Selection(snapshot.project_id(), snapshot.revision()))
+        else {
+            return Ok(false);
+        };
         let _preparation = self.preparation.lock().await;
-        if !self.is_current_preparation(request) {
+        if !self.is_current(request) {
             return Ok(false);
         }
         self.show_page_locked(snapshot, page, request).await
     }
 
     pub async fn clear(&self) {
-        let request = self.request_preparation();
+        let Some(request) = self.claim(Claim::Clear) else {
+            return;
+        };
         let _preparation = self.preparation.lock().await;
-        if !self.is_current_preparation(request) {
+        if !self.is_current(request) {
             return;
         }
-        if self.replace_frame_if_current(request, None) {
-            self.renderer.discard_retained_nodes();
-        }
+        self.replace_frame_if_current(request, None);
     }
 
     async fn show_page_locked(
         &self,
         snapshot: &Snapshot,
         page: Option<EntityId>,
-        request: u64,
+        request: Ticket,
     ) -> Result<bool> {
-        if !self.is_current_preparation(request) {
+        if !self.is_current(request) {
             return Ok(false);
         }
         let Some(page) = page else {
-            let replaced = self.replace_frame_if_current(request, None);
-            if replaced {
-                self.renderer.discard_retained_nodes();
-            }
-            return Ok(replaced);
+            return Ok(self.replace_frame_if_current(request, None));
         };
         let cached = self.page_frames.lock().get(page, snapshot.revision());
         if let Some(frame) = cached {
@@ -409,46 +486,92 @@ impl Desktop {
         Ok(true)
     }
 
-    fn request_preparation(&self) -> u64 {
+    fn claim(&self, claim: Claim) -> Option<Ticket> {
         let request = {
-            let mut presentation = self.presentation.write();
-            presentation.requested_preparation = presentation.requested_preparation.wrapping_add(1);
-            presentation.requested_preparation
+            let mut presentation = self.state.write();
+            let accepted = match (claim, presentation.claimed) {
+                (Claim::Project(..) | Claim::Clear, _) => true,
+                (Claim::Selection(project, revision), Some((claimed, latest))) => {
+                    project == claimed && revision >= latest
+                }
+                (Claim::Commit(project, revision), Some((claimed, latest))) => {
+                    project == claimed && revision > latest
+                }
+                (Claim::Selection(..) | Claim::Commit(..), None) => false,
+            };
+            if !accepted {
+                return None;
+            }
+            presentation.claimed = match claim {
+                Claim::Project(project, revision)
+                | Claim::Selection(project, revision)
+                | Claim::Commit(project, revision) => Some((project, revision)),
+                Claim::Clear => None,
+            };
+            presentation.requested_presentation =
+                presentation.requested_presentation.wrapping_add(1);
+            Ticket {
+                presentation: presentation.requested_presentation,
+                prefetch: None,
+            }
+        };
+        if matches!(claim, Claim::Project(..)) {
+            // Page identities and revisions are only meaningful within one project.
+            self.page_frames.lock().clear();
+        }
+        self.preparation_changed.notify_waiters();
+        Some(request)
+    }
+
+    fn claim_prefetch(&self, project: ProjectId, revision: Revision) -> Option<Ticket> {
+        let request = {
+            let mut presentation = self.state.write();
+            if !presentation
+                .claimed
+                .is_some_and(|(claimed, latest)| claimed == project && revision >= latest)
+            {
+                return None;
+            }
+            presentation.requested_prefetch = presentation.requested_prefetch.wrapping_add(1);
+            Ticket {
+                presentation: presentation.requested_presentation,
+                prefetch: Some(presentation.requested_prefetch),
+            }
         };
         self.preparation_changed.notify_waiters();
-        request
+        Some(request)
     }
 
-    fn is_current_preparation(&self, request: u64) -> bool {
-        self.presentation.read().requested_preparation == request
+    fn is_current(&self, request: Ticket) -> bool {
+        request.is_current(&self.state.read())
     }
 
-    async fn await_preparation<F>(&self, request: u64, future: F) -> Option<F::Output>
+    async fn await_preparation<F>(&self, request: Ticket, future: F) -> Option<F::Output>
     where
         F: Future,
     {
         tokio::select! {
             biased;
             () = self.preparation_superseded(request) => None,
-            output = future => self.is_current_preparation(request).then_some(output),
+            output = future => self.is_current(request).then_some(output),
         }
     }
 
-    async fn preparation_superseded(&self, request: u64) {
+    async fn preparation_superseded(&self, request: Ticket) {
         loop {
             let changed = self.preparation_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if !self.is_current_preparation(request) {
+            if !self.is_current(request) {
                 return;
             }
             changed.await;
         }
     }
 
-    fn replace_frame_if_current(&self, request: u64, frame: Option<RenderedFrame>) -> bool {
-        let mut presentation = self.presentation.write();
-        if presentation.requested_preparation != request {
+    fn replace_frame_if_current(&self, request: Ticket, frame: Option<RenderedFrame>) -> bool {
+        let mut presentation = self.state.write();
+        if !request.is_current(&presentation) {
             return false;
         }
         presentation.generation = presentation.generation.wrapping_add(1).max(1);
@@ -544,35 +667,36 @@ fn transform_point([a, b, c, d, e, f]: [f64; 6], point: &Point) -> Point {
 mod tests {
     use std::{future::pending, sync::Arc, time::Duration};
 
+    use koharu_scene::{Revision, Session};
     use tokio::{sync::Notify, time::timeout};
 
-    use super::Desktop;
+    use super::{Claim, Desktop};
 
     #[tokio::test]
     async fn newer_request_preempts_current_preparation_and_acquires_ownership() {
-        let desktop = Arc::new(Desktop::new().unwrap());
-        let first_request = desktop.request_preparation();
+        let presentation = Arc::new(Desktop::new().unwrap().presentation());
+        let first_request = presentation.claim(Claim::Clear).unwrap();
         let started = Arc::new(Notify::new());
         let first = {
-            let desktop = Arc::clone(&desktop);
+            let presentation = Arc::clone(&presentation);
             let started = Arc::clone(&started);
             tokio::spawn(async move {
-                let _preparation = desktop.preparation.lock().await;
+                let _preparation = presentation.preparation.lock().await;
                 started.notify_one();
-                desktop
+                presentation
                     .await_preparation(first_request, pending::<()>())
                     .await
             })
         };
         started.notified().await;
 
-        let latest_request = desktop.request_preparation();
-        let _preparation = timeout(Duration::from_secs(1), desktop.preparation.lock())
+        let latest_request = presentation.claim(Claim::Clear).unwrap();
+        let _preparation = timeout(Duration::from_secs(1), presentation.preparation.lock())
             .await
             .expect("the obsolete preparation must release ownership");
         assert!(first.await.unwrap().is_none());
         assert_eq!(
-            desktop
+            presentation
                 .await_preparation(latest_request, std::future::ready(7))
                 .await,
             Some(7)
@@ -581,13 +705,56 @@ mod tests {
 
     #[tokio::test]
     async fn obsolete_request_cannot_replace_the_presentation() {
-        let desktop = Desktop::new().unwrap();
-        let obsolete = desktop.request_preparation();
-        let latest = desktop.request_preparation();
+        let presentation = Desktop::new().unwrap().presentation();
+        let obsolete = presentation.claim(Claim::Clear).unwrap();
+        let latest = presentation.claim(Claim::Clear).unwrap();
 
-        assert!(!desktop.replace_frame_if_current(obsolete, None));
-        assert_eq!(desktop.canvas_state().generation, 0);
-        assert!(desktop.replace_frame_if_current(latest, None));
-        assert_eq!(desktop.canvas_state().generation, 1);
+        assert!(!presentation.replace_frame_if_current(obsolete, None));
+        assert_eq!(presentation.canvas_state().generation, 0);
+        assert!(presentation.replace_frame_if_current(latest, None));
+        assert_eq!(presentation.canvas_state().generation, 1);
+    }
+
+    #[tokio::test]
+    async fn older_project_state_cannot_supersede_newer_state() {
+        let presentation = Desktop::new().unwrap().presentation();
+        let project = Session::memory().await.unwrap().project_id();
+        let other = Session::memory().await.unwrap().project_id();
+        let at = Revision::new;
+
+        assert!(presentation.claim(Claim::Commit(project, at(1))).is_none());
+        let opened = presentation.claim(Claim::Project(project, at(2))).unwrap();
+        assert!(presentation.claim(Claim::Commit(project, at(2))).is_none());
+        assert!(
+            presentation
+                .claim(Claim::Selection(project, at(1)))
+                .is_none()
+        );
+        assert!(presentation.claim(Claim::Commit(other, at(3))).is_none());
+        assert!(presentation.claim_prefetch(project, at(1)).is_none());
+        let prefetch = presentation.claim_prefetch(project, at(2)).unwrap();
+        assert!(presentation.is_current(opened));
+
+        let committed = presentation.claim(Claim::Commit(project, at(3))).unwrap();
+        assert!(!presentation.is_current(opened));
+        assert!(!presentation.is_current(prefetch));
+        assert!(
+            presentation
+                .claim(Claim::Selection(project, at(2)))
+                .is_none()
+        );
+        let selected = presentation
+            .claim(Claim::Selection(project, at(3)))
+            .unwrap();
+        assert!(!presentation.is_current(committed));
+
+        presentation.claim(Claim::Clear).unwrap();
+        assert!(!presentation.is_current(selected));
+        assert!(
+            presentation
+                .claim(Claim::Selection(project, at(4)))
+                .is_none()
+        );
+        assert!(presentation.claim_prefetch(project, at(4)).is_none());
     }
 }

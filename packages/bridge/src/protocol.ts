@@ -12,7 +12,7 @@ export const commands = {
 	saveAgentConfig: (config: Config) => __TAURI_INVOKE<Config>("save_agent_config", { config }),
 	runAgent: (prompt: string, onEvent: Channel<Event>) => __TAURI_INVOKE<RunId>("run_agent", { prompt, onEvent }),
 	cancelAgent: (run: RunId) => __TAURI_INVOKE<null>("cancel_agent", { run }),
-	subscribe: (onCanvas: Channel<CanvasState>, onJob: Channel<Job>, onDownload: Channel<Download>, onResources: Channel<ModelResources>, onProject: Channel<ProjectInfo | null>) => __TAURI_INVOKE<StartupState>("subscribe", { onCanvas, onJob, onDownload, onResources, onProject }),
+	subscribe: (onCanvas: Channel<CanvasState>, onJob: Channel<Job>, onDownload: Channel<Download>, onResources: Channel<ModelResources>, onProject: Channel<ProjectInfo | null>, onPreferences: Channel<Preferences>) => __TAURI_INVOKE<StartupState>("subscribe", { onCanvas, onJob, onDownload, onResources, onProject, onPreferences }),
 	getProject: () => __TAURI_INVOKE<ProjectInfo | null>("get_project"),
 	getPages: () => __TAURI_INVOKE<PageSummary[]>("get_pages"),
 	getPage: () => __TAURI_INVOKE<Page | null>("get_page"),
@@ -21,6 +21,7 @@ export const commands = {
 	openProject: (name: string) => __TAURI_INVOKE<null>("open_project", { name }),
 	deleteProject: (name: string) => __TAURI_INVOKE<null>("delete_project", { name }),
 	closeProject: () => __TAURI_INVOKE<null>("close_project"),
+	openWindow: (project: string | null) => __TAURI_INVOKE<null>("open_window", { project }),
 	import: (source: PageImportSource) => __TAURI_INVOKE<null>("import", { source }),
 	selectPage: (page: EntityId) => __TAURI_INVOKE<PageSelection>("select_page", { page }),
 	renamePage: (page: EntityId, label: string) => __TAURI_INVOKE<null>("rename_page", { page, label }),
@@ -214,6 +215,7 @@ export type GenerationConfig = {
 	top_k?: number | null,
 	top_p?: number | null,
 	min_p?: number | null,
+	/**  Output budget per page; a multi-page request scales it by its page count, up to a cap. */
 	max_tokens?: number | null,
 	repeat_penalty?: number | null,
 	frequency_penalty?: number | null,
@@ -477,11 +479,31 @@ export type Translation = {
 	language: string | null,
 };
 
+/**  How the translation stage groups pages into provider requests. */
+export type TranslationBatching = 
+/**  Every page of a run in one request. */
+"all" | 
+/**
+ *  Every page of a run in one request; a request that is too large splits into halves,
+ *  down to single pages.
+ */
+"halving" | 
+/**  `pages_per_request` pages per request. */
+"custom" | 
+/**
+ *  Requests sized to the model's context budget; a request that is still too large
+ *  splits into halves.
+ */
+"auto";
+
 export type TranslationConfig = {
 	model: ModelSelection,
 	generation: GenerationConfig,
 	target_language: string,
 	instructions: string | null,
+	batching?: TranslationBatching,
+	/**  Pages per request in `TranslationBatching::Custom`; values below one act as one. */
+	pages_per_request?: number,
 };
 
 export type TypesettingConfig = {

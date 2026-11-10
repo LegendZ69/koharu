@@ -8,7 +8,12 @@ use serde::Deserialize;
 use url::Url;
 
 use super::send_json;
-use crate::{Error, Language, Model, Provider, Result, TranslationRequest};
+use crate::{Error, Language, Model, Provider, Result, TranslationRequest, batch::Batching};
+
+/// Requests are chunked below, so this window only sizes page batches.
+pub(super) const BATCHING: Batching = Batching::chunked(128_000);
+/// DeepL accepts at most 50 `text` values per request.
+const MAX_TEXTS: usize = 50;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -60,34 +65,57 @@ pub(super) async fn translate(
         .map(|entry| entry.source.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let mut form = request
-        .segments
-        .iter()
-        .map(|text| ("text", text.as_str()))
-        .collect::<Vec<_>>();
-    form.push(("target_lang", target));
-    if let Some(source) = source {
-        form.push(("source_lang", source));
+    let mut translations = Vec::with_capacity(request.segments.len());
+    for (texts, form) in forms(&request.segments, target, source, &context) {
+        let response: Response = send_json(
+            "deepl",
+            client
+                .post(format!("{root}/v2/translate"))
+                .header(
+                    "Authorization",
+                    format!("DeepL-Auth-Key {}", api_key.expose_secret()),
+                )
+                .form(&form),
+        )
+        .await?;
+        if response.translations.len() != texts.len() {
+            return Err(Error::SegmentCount {
+                provider: "deepl",
+                expected: texts.len(),
+                actual: response.translations.len(),
+            });
+        }
+        translations.extend(
+            response
+                .translations
+                .into_iter()
+                .map(|translation| translation.text),
+        );
     }
-    if !context.is_empty() {
-        form.push(("context", &context));
-    }
-    let response: Response = send_json(
-        "deepl",
-        client
-            .post(format!("{root}/v2/translate"))
-            .header(
-                "Authorization",
-                format!("DeepL-Auth-Key {}", api_key.expose_secret()),
-            )
-            .form(&form),
-    )
-    .await?;
-    Ok(response
-        .translations
-        .into_iter()
-        .map(|translation| translation.text)
-        .collect())
+    Ok(translations)
+}
+
+/// One form per request, each with at most [`MAX_TEXTS`] texts and the shared options.
+fn forms<'a>(
+    segments: &'a [String],
+    target: &'a str,
+    source: Option<&'a str>,
+    context: &'a str,
+) -> impl Iterator<Item = (&'a [String], Vec<(&'static str, &'a str)>)> {
+    segments.chunks(MAX_TEXTS).map(move |texts| {
+        let mut form = texts
+            .iter()
+            .map(|text| ("text", text.as_str()))
+            .collect::<Vec<_>>();
+        form.push(("target_lang", target));
+        if let Some(source) = source {
+            form.push(("source_lang", source));
+        }
+        if !context.is_empty() {
+            form.push(("context", context));
+        }
+        (texts, form)
+    })
 }
 
 #[derive(Deserialize)]
@@ -161,5 +189,21 @@ mod tests {
     fn unsupported_languages_are_not_substituted() {
         assert_eq!(target(Language::Filipino), None);
         assert_eq!(target(Language::English), Some("EN-US"));
+    }
+
+    #[test]
+    fn splits_texts_into_requests_of_at_most_fifty() {
+        let segments: Vec<_> = (0..120).map(|index| index.to_string()).collect();
+        let forms: Vec<_> = forms(&segments, "EN-US", Some("JA"), "").collect();
+
+        let sizes: Vec<_> = forms.iter().map(|(texts, _)| texts.len()).collect();
+        assert_eq!(sizes, [50, 50, 20]);
+        let (texts, form) = &forms[2];
+        assert_eq!(texts[0], "100");
+        assert_eq!(form.len(), 22);
+        assert_eq!(form[0], ("text", "100"));
+        assert_eq!(form[19], ("text", "119"));
+        assert_eq!(form[20], ("target_lang", "EN-US"));
+        assert_eq!(form[21], ("source_lang", "JA"));
     }
 }

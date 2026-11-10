@@ -14,12 +14,16 @@ import { expandLayerSelection } from '@/lib/document'
 import {
   controlFrame,
   draftFrame,
+  fitCamera,
   frameInsideRect,
   hitTestLayers,
   pagePoint,
   physicalPoint,
   selectableLayer,
   translateFrames,
+  widthCamera,
+  widthScroll,
+  type Camera,
 } from '@/lib/geometry'
 import {
   pageKey,
@@ -40,7 +44,14 @@ import {
   type CanvasTool,
 } from '@/lib/store'
 import { prefetchCanvasPages, workspaceColor, type CanvasColor } from '@koharu/bridge/canvas'
-import { commands, type Frame, type Point, type TransformFrame } from '@koharu/bridge/protocol'
+import {
+  commands,
+  type EntityId,
+  type Frame,
+  type JobId,
+  type Point,
+  type TransformFrame,
+} from '@koharu/bridge/protocol'
 import { Button } from '@koharu/ui/components/button'
 
 const BRUSH_DIAMETER_STEP = 4
@@ -78,14 +89,15 @@ interface StrokeGesture {
   color?: CanvasColor
 }
 
-interface CanvasView {
-  zoom: number
-  translation: [number, number]
-}
-
 interface StrokeUpdate {
   kind: 'paint' | 'erase' | 'inpaint'
   points: Point[]
+}
+
+interface PendingInpaint {
+  job: JobId | null
+  page: EntityId | null
+  revision: number
 }
 
 export function CanvasWorkspace() {
@@ -99,6 +111,7 @@ export function CanvasWorkspace() {
   const transformRevision = useRef<number | null>(null)
   const transformFinal = useRef<TransformFrame[]>([])
   const commitPending = useRef(false)
+  const pendingInpaint = useRef<PendingInpaint | null>(null)
   const commandQueue = useRef<Promise<void>>(Promise.resolve())
   const [previews, setPreviews] = useState<Record<string, Frame>>({})
   const [selectionRect, setSelectionRect] = useState<Frame | null>(null)
@@ -123,11 +136,43 @@ export function CanvasWorkspace() {
   const setTool = useKoharuStore((state) => state.setTool)
   const setBrush = useKoharuStore((state) => state.setBrush)
   const requestCanvasFit = useKoharuStore((state) => state.requestCanvasFit)
-  const canvasState = useCanvas(canvasElement, canvasRevision, canvasGeneration)
+  const presentedPage = useRef<EntityId | null>(null)
+  // The first frame of another page is drawn at that page's fitted camera: the camera is set right
+  // before activation and restored if the frame is not activated, so the page still shown is never
+  // drawn at it. The page is recorded here because a newer generation can follow before a render.
+  const presentFrame = useCallback((generation: number, activate: () => boolean) => {
+    const state = useKoharuStore.getState()
+    if (state.canvasGeneration !== generation || state.canvasPage === presentedPage.current)
+      return activate()
+    const fitted = fitCamera(
+      state.fitMode,
+      state.canvasViewport[0],
+      state.canvasViewport[1],
+      state.canvasSize[0],
+      state.canvasSize[1],
+      window.devicePixelRatio,
+    )
+    useKoharuStore.setState({ camera: { ...fitted, fit: state.fitMode } })
+    let activated = false
+    try {
+      activated = activate()
+    } finally {
+      if (activated) presentedPage.current = state.canvasPage
+      else useKoharuStore.setState({ camera: state.camera })
+    }
+    return activated
+  }, [])
+  const canvasState = useCanvas(canvasElement, canvasRevision, canvasGeneration, presentFrame)
   const canvas = canvasState.canvas
   const pageId = page?.id
-  const pageWidth = canvasSize[0] || page?.size.width
-  const pageHeight = canvasSize[1] || page?.size.height
+  // The native size describes `canvasPage`, which trails the query during a page switch.
+  const pageWidth = canvasPage === pageId ? canvasSize[0] : page?.size.width
+  const pageHeight = canvasPage === pageId ? canvasSize[1] : page?.size.height
+  // The presented frame trails the query as well. A fit applies only once the queried page is on
+  // screen, so the page still shown is never drawn at the next page's camera.
+  if (canvasState.generation === canvasGeneration) presentedPage.current = canvasPage
+  const fitPage =
+    presentedPage.current === null || presentedPage.current === pageId ? pageId : undefined
   const activeRaster =
     selected.length === 1
       ? page?.layers.find((layer) => layer.id === selected[0] && layer.type === 'raster')
@@ -232,22 +277,56 @@ export function CanvasWorkspace() {
     setPreviews({})
   }, [canvas, strokeUpdates, transformUpdates])
 
+  // A committed Remove stroke stays pending in the canvas, blocking every other edit, until a
+  // newer revision of its page is presented. A job that ends without one releases the stroke; a
+  // job not reported yet does not, because the command's result can arrive before its messages.
+  const settleInpaint = useCallback(() => {
+    const pending = pendingInpaint.current
+    if (!pending) return
+    const { canvasPage, canvasRevision, endedJobs } = useKoharuStore.getState()
+    const superseded =
+      canvasPage !== pending.page || canvasRevision === null || canvasRevision > pending.revision
+    if (!superseded && pending.job !== null && !endedJobs.includes(pending.job)) return
+    pendingInpaint.current = null
+    if (superseded) return
+    try {
+      canvas?.cancelStroke()
+    } catch (error) {
+      receiveError(errorMessage(error))
+    }
+  }, [canvas])
+
   const fitCanvas = useCallback(() => {
     const element = surface.current
-    if (!element || !pageId || pageWidth === undefined || pageHeight === undefined) return
+    if (!element || !fitPage || pageWidth === undefined || pageHeight === undefined) return
     const bounds = element.getBoundingClientRect()
     const dpr = window.devicePixelRatio
-    const next = containCamera(bounds.width * dpr, bounds.height * dpr, pageWidth, pageHeight)
-    useKoharuStore.setState({ camera: { ...next, fitted: true } })
-  }, [pageHeight, pageId, pageWidth])
+    const fit = useKoharuStore.getState().fitMode
+    const next = fitCamera(fit, bounds.width * dpr, bounds.height * dpr, pageWidth, pageHeight, dpr)
+    useKoharuStore.setState({ camera: { ...next, fit } })
+  }, [fitPage, pageHeight, pageWidth])
 
   const report = useCallback(() => {
     const element = surface.current
-    if (!element || !canvas) return
+    if (!element) return
     const bounds = element.getBoundingClientRect()
-    canvas.resize(bounds.width, bounds.height, window.devicePixelRatio, workspaceColor())
-    if (useKoharuStore.getState().camera.fitted) fitCanvas()
-  }, [canvas, fitCanvas])
+    const dpr = window.devicePixelRatio
+    const viewport: [number, number] = [bounds.width * dpr, bounds.height * dpr]
+    useKoharuStore.setState({ canvasViewport: viewport })
+    if (!canvas) return
+    canvas.resize(bounds.width, bounds.height, dpr, workspaceColor())
+    const { camera } = useKoharuStore.getState()
+    if (camera.fit === 'page') fitCanvas()
+    else if (
+      camera.fit === 'width' &&
+      fitPage &&
+      pageWidth !== undefined &&
+      pageHeight !== undefined
+    ) {
+      const next = widthCamera(viewport[0], viewport[1], pageWidth, pageHeight, dpr, camera)
+      useKoharuStore.setState({ camera: { ...next, fit: 'width' } })
+    }
+  }, [canvas, fitCanvas, fitPage, pageHeight, pageWidth])
 
   const setZoom = useCallback((zoom: number) => {
     const element = surface.current
@@ -262,7 +341,7 @@ export function CanvasWorkspace() {
       camera: {
         zoom,
         translation: [center.x - pageX * zoom, center.y - pageY * zoom],
-        fitted: false,
+        fit: null,
       },
     })
   }, [])
@@ -289,7 +368,7 @@ export function CanvasWorkspace() {
   // frame late under continuous input and halves the presented rate.
   useEffect(() => {
     if (!canvas) return
-    const apply = ({ zoom, translation }: CanvasView) => {
+    const apply = ({ zoom, translation }: Camera) => {
       try {
         canvas.setView(zoom, translation)
       } catch (error) {
@@ -301,6 +380,22 @@ export function CanvasWorkspace() {
       if (state.camera !== previous.camera) apply(state.camera)
     })
   }, [canvas])
+
+  useEffect(() => {
+    if (!canvas) return
+    const unsubscribe = useKoharuStore.subscribe((state, previous) => {
+      if (
+        state.endedJobs !== previous.endedJobs ||
+        state.canvasPage !== previous.canvasPage ||
+        state.canvasRevision !== previous.canvasRevision
+      )
+        settleInpaint()
+    })
+    return () => {
+      unsubscribe()
+      pendingInpaint.current = null
+    }
+  }, [canvas, settleInpaint])
 
   useEffect(() => {
     if (
@@ -376,7 +471,11 @@ export function CanvasWorkspace() {
         return
       }
       if (event.key.toLowerCase() === state.shortcuts.fit) {
-        requestCanvasFit()
+        requestCanvasFit('page')
+        return
+      }
+      if (event.key.toLowerCase() === state.shortcuts.fitWidth) {
+        requestCanvasFit('width')
         return
       }
       if (event.key === 'Escape') {
@@ -448,9 +547,20 @@ export function CanvasWorkspace() {
     }
 
     if (current.kind === 'pan') {
-      const { zoom } = useKoharuStore.getState().camera
+      const { zoom, fit } = useKoharuStore.getState().camera
       const bounds = surface.current!.getBoundingClientRect()
       const dpr = window.devicePixelRatio
+      if (fit === 'width') {
+        const y = widthScroll(
+          current.translation[1] + physical.y - current.start.y,
+          zoom,
+          pageHeight ?? page.size.height,
+          bounds.height * dpr,
+          dpr,
+        )
+        useKoharuStore.setState({ camera: { zoom, translation: [current.translation[0], y], fit } })
+        return
+      }
       let translation: [number, number] = [
         current.translation[0] + physical.x - current.start.x,
         current.translation[1] + physical.y - current.start.y,
@@ -464,7 +574,7 @@ export function CanvasWorkspace() {
         bounds.height * dpr,
         dpr,
       )
-      useKoharuStore.setState({ camera: { zoom, translation, fitted: false } })
+      useKoharuStore.setState({ camera: { zoom, translation, fit: null } })
       return
     }
 
@@ -575,7 +685,10 @@ export function CanvasWorkspace() {
             })
             : enqueue(() =>
               call(commands.commitInpaint, current.revision, current.points, current.diameter),
-            )
+            ).then((job) => {
+              pendingInpaint.current = { job, page: canvasPage, revision: current.revision }
+              settleInpaint()
+            })
       commitPending.current = true
       void operation
         .catch(() => canvas?.cancelStroke())
@@ -795,6 +908,21 @@ export function CanvasWorkspace() {
                 deltaX = deltaY
                 deltaY = 0
               }
+              // A width fit scrolls like a document: vertically, between the page edges, and it
+              // stays fitted, so a resize still refits it.
+              if (current.fit === 'width') {
+                const y = widthScroll(
+                  current.translation[1] - deltaY * dpr,
+                  zoom,
+                  pageHeight ?? page.size.height,
+                  event.currentTarget.getBoundingClientRect().height * dpr,
+                  dpr,
+                )
+                useKoharuStore.setState({
+                  camera: { ...current, translation: [current.translation[0], y] },
+                })
+                return
+              }
               translation = [
                 current.translation[0] - deltaX * dpr,
                 current.translation[1] - deltaY * dpr,
@@ -811,7 +939,7 @@ export function CanvasWorkspace() {
               bounds.height * dpr,
               dpr,
             )
-            useKoharuStore.setState({ camera: { zoom, translation, fitted: false } })
+            useKoharuStore.setState({ camera: { zoom, translation, fit: null } })
           }}
         >
           {selectionRect && (
@@ -917,28 +1045,6 @@ function rgbaToHex(color: [number, number, number, number]): string {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
-}
-
-function containCamera(
-  viewportWidth: number,
-  viewportHeight: number,
-  pageWidth: number,
-  pageHeight: number,
-): CanvasView {
-  if (viewportWidth <= 0 || viewportHeight <= 0 || pageWidth <= 0 || pageHeight <= 0) {
-    return { zoom: 1, translation: [0, 0] }
-  }
-  const zoom = Math.max(
-    Number.EPSILON,
-    Math.min(viewportWidth / pageWidth, viewportHeight / pageHeight),
-  )
-  return {
-    zoom,
-    translation: [
-      (viewportWidth - pageWidth * zoom) * 0.5,
-      (viewportHeight - pageHeight * zoom) * 0.5,
-    ],
-  }
 }
 
 function errorMessage(error: unknown): string {

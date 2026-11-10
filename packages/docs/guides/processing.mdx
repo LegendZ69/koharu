@@ -30,6 +30,8 @@ flowchart LR
 
 Detection creates regions and removal masks. OCR reads those regions. Translation writes target text. Inpainting reconstructs artwork under the lettering.
 
+Translation sends pages in batches chosen in **Settings → Translation → Batching**: **Auto** sizes each request to the model, **All pages** and **Halving** send every page of the run together, and **Custom** sends a fixed number per request. A batch starts once OCR has finished on all of its pages, and each page still commits as its own undo step.
+
 <Note>
   Omitted prerequisites are not added automatically. Include detection or OCR when a later stage
   needs fresh input. **Run Inpainting** means detection plus inpainting; it does not include OCR or
@@ -40,9 +42,9 @@ The **Process** menu also offers **Process Project**, **Process Selected Pages**
 
 ## Follow progress and stop work
 
-Only one processing job runs at a time, and pages cannot be imported while one is running. The activity center shows the stage, model, progress, and failures.
+Choose **Run** again to start another job while earlier ones are still running. Jobs take turns at each stage, also with jobs in other windows, so their pages interleave stage by stage, and translation with a hosted provider does not wait for local models on the GPU. A window cannot import pages while one of its jobs is running. The activity center lists every job of its window in the order it started, with its stage, model, progress, and failures; stop each one there.
 
-Each stage commits when it finishes. Completed work remains available if a later stage fails. Stopping prevents new work from starting; a native call already in progress returns at a safe boundary. Its result is discarded if stop was requested before the commit.
+Each stage commits when it finishes. Completed work remains available if a later stage fails. Stopping prevents new work from starting. A job still waiting for its turn and a request to a hosted provider end at once; local inference already running on the GPU finishes its current step, and that uncommitted result is discarded.
 
 Stages with no applicable input complete without inference, although the model is still loaded first. A page with no detected text does not need OCR or translation.
 

@@ -11,10 +11,10 @@ use futures::future::try_join_all;
 use koharu_rasterizer::{RasterOptions, Rasterizer};
 use koharu_scene::{
     Asset, AssetRole, BlobId, Change, Component, ComponentOwner, EntityChange, EntityId, FitsTo,
-    FlowsIn, Geometry, Group, OcrAnalysis, Origin, Page, Presents, RasterLayer, RasterLayerKind,
-    RecognizedFrom, Region, RelationChange, RelationId, RelationSpec, Revision, Snapshot,
-    TextAlignment, TextDirection, TextLayout as SceneTextLayout, TextLayoutKind, Translation,
-    Typography, Visibility,
+    FlowsIn, Geometry, Group, OcrAnalysis, Origin, Page, Presents, ProjectId, RasterLayer,
+    RasterLayerKind, RecognizedFrom, Region, RelationChange, RelationId, RelationSpec, Revision,
+    Snapshot, TextAlignment, TextDirection, TextLayout as SceneTextLayout, TextLayoutKind,
+    Translation, Typography, Visibility,
 };
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -233,9 +233,13 @@ impl Renderer {
         .map_err(Error::FontResource)
     }
 
-    /// Discards retained Vello nodes after their presentation resource lifetime ends.
-    pub fn discard_retained_nodes(&self) {
-        self.inner.nodes.lock().entries.clear();
+    /// Discards a project's retained Vello nodes once no presentation shows the project.
+    pub fn discard_retained_nodes(&self, project: ProjectId) {
+        self.inner
+            .nodes
+            .lock()
+            .entries
+            .retain(|&(owner, ..), _| owner != project);
     }
 
     async fn finish(
@@ -245,6 +249,7 @@ impl Renderer {
         previous: Option<&Frame>,
         affected: Option<&AffectedDependencies>,
     ) -> Result<Frame> {
+        let project = snapshot.project_id();
         let mut nodes = vec![None; compiled.layers.len()];
         let mut pending = Vec::new();
         let mut reused = 0;
@@ -269,9 +274,11 @@ impl Renderer {
                     reused += 1;
                     continue;
                 }
-                if let Some(node) =
-                    node_cache.get((compiled.page, draft.entity), &draft.descriptor, clock)
-                {
+                if let Some(node) = node_cache.get(
+                    (project, compiled.page, draft.entity),
+                    &draft.descriptor,
+                    clock,
+                ) {
                     nodes[index] = Some(node);
                     reused += 1;
                 } else {
@@ -311,7 +318,7 @@ impl Renderer {
             for (index, node) in built {
                 let node = Arc::new(node);
                 self.inner.nodes.lock().insert(
-                    (compiled.page, compiled.layers[index].entity),
+                    (project, compiled.page, compiled.layers[index].entity),
                     node.clone(),
                     clock,
                 );
@@ -1467,8 +1474,10 @@ struct CachedNode {
     last_used: u64,
 }
 
+/// Retained nodes keyed by project, page, and entity, so a project's nodes can be discarded
+/// while other projects stay presented.
 struct NodeCache {
-    entries: HashMap<(EntityId, EntityId), CachedNode>,
+    entries: HashMap<(ProjectId, EntityId, EntityId), CachedNode>,
     capacity: usize,
     clock: u64,
 }
@@ -1489,7 +1498,7 @@ impl NodeCache {
 
     fn get(
         &mut self,
-        key: (EntityId, EntityId),
+        key: (ProjectId, EntityId, EntityId),
         descriptor: &NodeDescriptor,
         clock: u64,
     ) -> Option<Arc<RetainedNode>> {
@@ -1501,7 +1510,12 @@ impl NodeCache {
         Some(entry.node.clone())
     }
 
-    fn insert(&mut self, key: (EntityId, EntityId), node: Arc<RetainedNode>, clock: u64) {
+    fn insert(
+        &mut self,
+        key: (ProjectId, EntityId, EntityId),
+        node: Arc<RetainedNode>,
+        clock: u64,
+    ) {
         if self.capacity == 0 {
             return;
         }

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use super::{StageInput, StageProcessor, finish, generation};
+use super::{StageInput, StageLifecycle, finish, generation};
 use crate::{ModelCell, OcrModel, scope::geometry_extents};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ use koharu_scene::{
 const PRODUCER: &str = "dev.koharu.pipeline.ocr";
 
 pub(super) struct Processor {
-    config: OcrModel,
+    pub(super) config: OcrModel,
     device: koharu_ml::Device,
     model: ModelCell<Model>,
 }
@@ -33,7 +33,7 @@ impl Processor {
 }
 
 #[async_trait]
-impl StageProcessor for Processor {
+impl StageLifecycle for Processor {
     fn model(&self) -> &'static str {
         match self.config {
             OcrModel::MangaOcr => "manga-ocr",
@@ -52,8 +52,10 @@ impl StageProcessor for Processor {
             .ensure(|| Model::load(self.device.clone(), &self.config))
             .await
     }
+}
 
-    async fn process(&self, input: StageInput) -> Result<koharu_scene::Patch> {
+impl Processor {
+    pub(super) async fn process(&self, input: StageInput) -> Result<koharu_scene::Patch> {
         self.model
             .lock()
             .await

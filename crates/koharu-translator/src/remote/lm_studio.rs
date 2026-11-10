@@ -2,19 +2,25 @@
 // https://lmstudio.ai/docs/developer/openai-compat/chat-completions
 // https://lmstudio.ai/docs/developer/openai-compat/structured-output
 
+use std::time::Duration;
+
 use anyhow::Context;
 use koharu_secrets::ExposeSecret;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::send_json;
 use crate::{
-    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::encode_image,
-    display_name, prompt,
+    GenerationConfig, Model, PageImage, Provider, Result, TranslationRequest,
+    backend::Translations, batch::Batching, display_name, prompt,
 };
 
 const DEFAULT_BASE_URL: &str = "http://localhost:1234";
+/// LM Studio loads models with a small context by default.
+pub(super) const BATCHING: Batching = Batching::prompt(4_096);
+/// How long sizing a batch waits for LM Studio to report the loaded context.
+const CONTEXT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -36,20 +42,10 @@ pub(super) async fn translate(
     model: &str,
     generation: &GenerationConfig,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("lm-studio")?;
     let (system, user) = prompt::prompts(request)?;
-    let user_content = match request.image.as_deref() {
-        Some(image) => MessageContent::Parts(vec![
-            ContentPart::Text { text: user },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: encode_image(image)?.data_url(),
-                },
-            },
-        ]),
-        None => MessageContent::Text(user),
-    };
+    let user_content = MessageContent::user(user, &request.images)?;
     let body = ChatRequest {
         model,
         messages: [
@@ -95,17 +91,11 @@ pub(super) async fn translate(
         .message
         .content
         .context("LM Studio returned no message content")?;
-    Ok(prompt::translations("lm-studio", &text, &request.segments)?)
+    prompt::translations("lm-studio", &text, &request.segments)
 }
 
 pub(super) async fn models(client: &Client, config: &LmStudioConfig) -> Result<Vec<Model>> {
-    let api_key = koharu_secrets::get("lm-studio")?;
-    let request = client.get(endpoint(config.base_url.as_ref(), "api/v1/models"));
-    let request = match api_key {
-        Some(api_key) => request.bearer_auth(api_key.expose_secret()),
-        None => request,
-    };
-    let response: ModelsResponse = send_json("lm-studio", request).await?;
+    let response: ModelsResponse = send_json("lm-studio", models_request(client, config)?).await?;
     Ok(response
         .models
         .into_iter()
@@ -127,6 +117,31 @@ pub(super) async fn models(client: &Client, config: &LmStudioConfig) -> Result<V
         .collect())
 }
 
+/// Sizes requests to `model` by the context LM Studio reports for it, or by [`BATCHING`] when the
+/// server does not answer within [`CONTEXT_TIMEOUT`].
+pub(super) async fn batching(client: &Client, config: &LmStudioConfig, model: &str) -> Batching {
+    let listing = async {
+        let request = models_request(client, config)?.timeout(CONTEXT_TIMEOUT);
+        send_json::<ContextListing>("lm-studio", request).await
+    };
+    match listing.await {
+        Ok(listing) => listing.batching(model),
+        Err(error) => {
+            tracing::debug!(%error, "LM Studio did not report the loaded model context");
+            BATCHING
+        }
+    }
+}
+
+/// LM Studio's native model listing, which reports capabilities and loaded instances.
+fn models_request(client: &Client, config: &LmStudioConfig) -> Result<RequestBuilder> {
+    let request = client.get(endpoint(config.base_url.as_ref(), "api/v1/models"));
+    Ok(match koharu_secrets::get("lm-studio")? {
+        Some(api_key) => request.bearer_auth(api_key.expose_secret()),
+        None => request,
+    })
+}
+
 fn endpoint(base_url: Option<&Url>, suffix: &str) -> String {
     let base_url = base_url.map_or(DEFAULT_BASE_URL, Url::as_str);
     format!(
@@ -139,7 +154,7 @@ fn endpoint(base_url: Option<&Url>, suffix: &str) -> String {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: [Message; 2],
+    messages: [Message<'a>; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,28 +185,45 @@ struct JsonSchema {
 }
 
 #[derive(Serialize)]
-struct Message {
+struct Message<'a> {
     role: &'static str,
-    content: MessageContent,
+    content: MessageContent<'a>,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum MessageContent {
+enum MessageContent<'a> {
     Text(String),
-    Parts(Vec<ContentPart>),
+    Parts(Vec<ContentPart<'a>>),
+}
+
+impl<'a> MessageContent<'a> {
+    fn user(text: String, images: &'a [PageImage]) -> anyhow::Result<Self> {
+        if images.is_empty() {
+            return Ok(Self::Text(text));
+        }
+        let mut parts = vec![ContentPart::Text { text }];
+        for image in images {
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: image.data_url()?,
+                },
+            });
+        }
+        Ok(Self::Parts(parts))
+    }
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContentPart {
+enum ContentPart<'a> {
     Text { text: String },
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl { image_url: ImageUrl<'a> },
 }
 
 #[derive(Serialize)]
-struct ImageUrl {
-    url: String,
+struct ImageUrl<'a> {
+    url: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -230,6 +262,42 @@ struct ListedModelCapabilities {
 
 #[derive(Deserialize)]
 struct ListedModelReasoning {}
+
+/// The model listing as far as batch sizing reads it.
+#[derive(Deserialize)]
+struct ContextListing {
+    models: Vec<ContextModel>,
+}
+
+#[derive(Deserialize)]
+struct ContextModel {
+    key: String,
+    loaded_instances: Vec<LoadedInstance>,
+}
+
+#[derive(Deserialize)]
+struct LoadedInstance {
+    config: LoadedConfig,
+}
+
+#[derive(Deserialize)]
+struct LoadedConfig {
+    context_length: usize,
+}
+
+impl ContextListing {
+    /// Requests fit the smallest context `model` is loaded with. A model that is not loaded yet
+    /// loads with LM Studio's small default context.
+    fn batching(&self, model: &str) -> Batching {
+        self.models
+            .iter()
+            .filter(|listed| listed.key == model)
+            .flat_map(|listed| &listed.loaded_instances)
+            .map(|instance| instance.config.context_length)
+            .min()
+            .map_or(BATCHING, Batching::prompt)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -300,6 +368,43 @@ mod tests {
     }
 
     #[test]
+    fn batches_are_sized_by_the_context_a_model_is_loaded_with() {
+        let listing: ContextListing = serde_json::from_value(serde_json::json!({
+            "models": [
+                {
+                    "type": "llm",
+                    "key": "google/gemma-4-26b-a4b",
+                    "loaded_instances": [
+                        {
+                            "id": "google/gemma-4-26b-a4b",
+                            "config": { "context_length": 32_768, "parallel": 4 }
+                        },
+                        {
+                            "id": "google/gemma-4-26b-a4b:2",
+                            "config": { "context_length": 16_384 }
+                        }
+                    ],
+                    "max_context_length": 262_144
+                },
+                {
+                    "type": "llm",
+                    "key": "deepseek-r1",
+                    "loaded_instances": [],
+                    "max_context_length": 131_072
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            listing.batching("google/gemma-4-26b-a4b"),
+            Batching::prompt(16_384)
+        );
+        // A model that is not loaded yet loads on its first request with the default context.
+        assert_eq!(listing.batching("deepseek-r1"), BATCHING);
+        assert_eq!(listing.batching("publisher/missing"), BATCHING);
+    }
+
+    #[test]
     fn serializes_lm_studio_request_contract() {
         let body = ChatRequest {
             model: "publisher/model",
@@ -344,7 +449,7 @@ mod tests {
             },
             ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: "data:image/jpeg;base64,image".to_owned(),
+                    url: "data:image/jpeg;base64,image",
                 },
             },
         ]);

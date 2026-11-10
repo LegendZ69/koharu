@@ -26,6 +26,7 @@ vi.mock('react-i18next', async (importOriginal) => {
 
 vi.mock('@tauri-apps/api/window', () => {
   const window = {
+    label: 'main',
     close: vi.fn(async () => undefined),
     isMaximized: vi.fn(async () => false),
     minimize: vi.fn(async () => undefined),
@@ -75,13 +76,16 @@ beforeEach(() => {
     translationModels: [],
     resources: null,
     jobs: {},
+    endedJobs: [],
     downloads: {},
-    camera: { zoom: 1, translation: [0, 0], fitted: true },
+    camera: { zoom: 1, translation: [0, 0], fit: 'page' },
     canvasPage: null,
     canvasRevision: null,
     canvasGeneration: 0,
     canvasSize: [0, 0],
+    canvasViewport: [0, 0],
     fitCanvasRequest: 0,
+    fitMode: 'page',
     layerFrames: {},
     selectedLayers: [],
     selectedPages: [],

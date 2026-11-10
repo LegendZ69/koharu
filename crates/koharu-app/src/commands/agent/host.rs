@@ -1,12 +1,16 @@
-use std::{future::Future, pin::Pin, sync::OnceLock};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use koharu_agent::{Control, Host, Invocation, Tool, ToolCall};
 use koharu_desktop::{Desktop, Frame};
-use koharu_pipeline::{Committer, Operation, RunStatus, Scope, Stage, StageOutput, StopToken};
-use koharu_scene::{Commit, EntityId, Snapshot};
+use koharu_pipeline::{Operation, RunStatus, Scope, Stage};
+use koharu_scene::{Commit, EntityId};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,29 +18,39 @@ use tauri::{AppHandle, Manager as _};
 use tauri_runtime_cef::CefRuntime;
 
 use crate::commands::{
-    ChannelExt as _,
-    canvas::{CanvasChannel, Point},
+    canvas::Point,
     editing::{GeometryUpdate, TypographyUpdate},
     output,
     preferences::Preferences,
-    processing::{JobId, Processing},
-    project::{CurrentProject, Project, Typography},
+    processing,
+    project::{Project, Typography},
+    workspace::{Workspace, Workspaces},
 };
 
 #[derive(Clone)]
 pub(super) struct KoharuHost {
+    label: String,
     handle: AppHandle<CefRuntime>,
 }
 
 impl KoharuHost {
-    pub(super) fn new(handle: AppHandle<CefRuntime>) -> Self {
-        Self { handle }
+    pub(super) fn new(label: String, handle: AppHandle<CefRuntime>) -> Self {
+        Self { label, handle }
+    }
+
+    /// The workspace is looked up by window label: the workspace owns this host through its
+    /// agent session, so holding it here would keep the project open forever.
+    fn workspace(&self) -> Result<Arc<Workspace>> {
+        self.handle
+            .state::<Workspaces>()
+            .get(&self.label)
+            .context("the agent's window is closed")
     }
 
     async fn project_context(&self) -> Result<Value> {
+        let workspace = self.workspace()?;
         let (project, pages) = {
-            let current = self.handle.state::<CurrentProject>();
-            let current = current.project.lock().await;
+            let current = workspace.project.lock().await;
             let project = current.as_ref().context("no project is open")?;
             let snapshot = project.snapshot();
             let pages = Project::pages(&snapshot)?
@@ -90,79 +104,38 @@ impl KoharuHost {
     where
         T: serde::Serialize + Send,
     {
+        let workspace = self.workspace()?;
         let (commit, value, page, project) = {
-            let current = self.handle.state::<CurrentProject>();
-            let mut current = current.project.lock().await;
+            let mut current = workspace.project.lock().await;
             let project = current.as_mut().context("no project is open")?;
             let (commit, value) = mutation(project).await?;
             project.record_commit(&commit);
             project.reconcile_page();
             (commit, value, project.active_page(), project.info())
         };
-        let revision = commit.revision;
-        self.synchronize(commit, page).await?;
+        workspace.synchronize(&commit, page).await?;
         Invocation::changed(json!({
-            "revision": revision,
+            "revision": commit.revision,
             "project": project,
             "result": value,
         }))
     }
 
-    async fn synchronize(&self, commit: Commit, page: Option<EntityId>) -> Result<()> {
-        let desktop = self.handle.state::<Desktop>();
-        desktop.synchronize(&commit.snapshot, page, &commit).await?;
-        let canvas = desktop.canvas_state();
-        self.handle.state::<CanvasChannel>().channel.publish(canvas);
-        Ok(())
-    }
-
     async fn run_pipeline(&self, arguments: RunPipeline, control: &Control) -> Result<Invocation> {
         let scope = arguments.scope()?;
         let operation = arguments.operation.into();
-        let snapshot = self
-            .handle
-            .state::<CurrentProject>()
-            .project
-            .lock()
-            .await
-            .as_ref()
-            .context("no project is open")?
-            .snapshot();
-        let job = JobId::new();
-        let stop = StopToken::default();
-        {
-            let processing = self.handle.state::<Processing>();
-            let mut stops = processing.stops.lock();
-            if !stops.is_empty() {
-                bail!("another pipeline process is already running");
+        let workspace = self.workspace()?;
+        let (job, mut outcome) = processing::start_job(&workspace, scope, operation, None).await?;
+        let result = tokio::select! {
+            result = &mut outcome => result,
+            () = control.cancelled() => {
+                let _ = workspace.processing.stop(job);
+                outcome.await
             }
-            stops.insert(job, stop.clone());
-        }
-
-        let watcher = tauri::async_runtime::spawn({
-            let control = control.clone();
-            let stop = stop.clone();
-            async move {
-                control.cancelled().await;
-                stop.stop();
-            }
-        });
-        let mut committer = AgentCommitter { host: self.clone() };
-        let request = koharu_pipeline::Request {
-            operation,
-            scope,
-            stop,
-            progress: None,
-            inpainting_mask: None,
         };
-        let result = self
-            .handle
-            .state::<koharu_pipeline::Pipeline>()
-            .execute(snapshot, request, &mut committer)
-            .await;
-        watcher.abort();
-        self.handle.state::<Processing>().stops.lock().remove(&job);
-        let report = result.map_err(|error| anyhow!(error))?;
+        let report = result
+            .context("the pipeline task failed")?
+            .map_err(|error| anyhow!(error))?;
         if report.status == RunStatus::Stopped {
             bail!("pipeline processing was cancelled");
         }
@@ -239,9 +212,9 @@ impl Host for KoharuHost {
             "view_page" => {
                 let arguments: ViewPage = arguments(&call)?;
                 let page = entity(&arguments.page)?;
+                let workspace = self.workspace()?;
                 let (label, snapshot) = {
-                    let current = self.handle.state::<CurrentProject>();
-                    let current = current.project.lock().await;
+                    let current = workspace.project.lock().await;
                     let project = current.as_ref().context("no project is open")?;
                     let snapshot = project.snapshot();
                     let label = snapshot.page(page)?.page()?.label;
@@ -447,29 +420,6 @@ impl Host for KoharuHost {
             "run_pipeline" => self.run_pipeline(arguments(&call)?, control).await,
             name => bail!("unknown Koharu tool {name}"),
         }
-    }
-}
-
-struct AgentCommitter {
-    host: KoharuHost,
-}
-
-#[async_trait]
-impl Committer for AgentCommitter {
-    async fn commit(&mut self, output: StageOutput) -> Result<Snapshot> {
-        let (commit, page) = {
-            let current = self.host.handle.state::<CurrentProject>();
-            let mut current = current.project.lock().await;
-            let project = current.as_mut().context("no project is open")?;
-            let Some(commit) = project.commit_rebased(output.patch).await? else {
-                return Ok(project.snapshot());
-            };
-            project.record_commit(&commit);
-            (commit, project.active_page())
-        };
-        let snapshot = commit.snapshot.clone();
-        self.host.synchronize(commit, page).await?;
-        Ok(snapshot)
     }
 }
 

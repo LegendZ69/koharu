@@ -8,7 +8,7 @@ The toolbar controls pointer behavior. The inspector changes the selected layer'
 
 ## Navigate and select
 
-Use **Pan** to move the view and the status bar to change zoom. **View → Fit Window**, or `0` by default, fits the active page. Switching pages returns to a fitted view.
+Use **Pan** to move the view and the status bar to change zoom. **View → Fit Window**, or `0` by default, fits the active page. **View → Fit Width**, or `W` by default, fills the canvas width and starts at the top of the page; scrolling and panning then move only up and down. Switching pages applies the fit you chose last, even after you zoom.
 
 Use **Select** to pick editable layers; hold `Shift`, `Ctrl`, or `Command` to add or remove layers. Text layers can be moved, resized, and rotated. Resize and rotate handles appear for a single selection; a multiple selection can only be moved. A drag previews the transform; finishing commits it, and canceling restores the previous presentation.
 
@@ -32,7 +32,7 @@ Use **Select** to pick editable layers; hold `Shift`, `Ctrl`, or `Command` to ad
   <Tab title='Remove'>
     Paint over source marks with **Remove**. Releasing the stroke runs inpainting on that area
     immediately and merges the result into the page's cleanup layer; the mask is not kept as a
-    layer. The stroke is rejected while another processing job is running. See
+    layer. The stroke starts its own processing job, even while other jobs are running. See
     [cleanup](/guides/cleanup).
   </Tab>
 </Tabs>

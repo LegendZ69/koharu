@@ -9,8 +9,6 @@ import { commands, type Scope, type Stage } from '@koharu/bridge/protocol'
 export function CanvasCommandBar() {
   const page = usePage().data
   const selectedPages = useKoharuStore((state) => state.selectedPages)
-  const jobs = useKoharuStore((state) => state.jobs)
-  const running = Object.values(jobs).find((job) => job.state === 'running')
 
   const run = (selection: PipelineScope, stages: Stage[]) => {
     if (!page) return
@@ -32,7 +30,7 @@ export function CanvasCommandBar() {
   return (
     <header className='flex h-10 shrink-0 items-center gap-2 border-b border-border/80 bg-[var(--surface-toolbar)] px-2.5'>
       <div className='min-w-0 flex-1' />
-      <InferenceControl disabled={!page || Boolean(running)} onRun={run} />
+      <InferenceControl disabled={!page} onRun={run} />
     </header>
   )
 }

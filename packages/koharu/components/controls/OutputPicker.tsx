@@ -25,7 +25,6 @@ export function OutputPicker({
   targetLanguage,
   instructions,
   languages,
-  disabled = false,
   saving = false,
   onBack,
   onChange,
@@ -33,7 +32,6 @@ export function OutputPicker({
   targetLanguage: string
   instructions: string | null
   languages: LanguageChoice[]
-  disabled?: boolean
   saving?: boolean
   onBack: () => void
   onChange: (draft: OutputDraft) => void
@@ -46,9 +44,9 @@ export function OutputPicker({
   const changed =
     draft.targetLanguage !== targetLanguage || draft.instructions !== (instructions ?? '')
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
-  const latest = useRef({ changed, disabled, draft, onChange, saving })
+  const latest = useRef({ changed, draft, onChange, saving })
   const submitted = useRef<OutputDraft | null>(null)
-  latest.current = { changed, disabled, draft, onChange, saving }
+  latest.current = { changed, draft, onChange, saving }
   const languageChoices = useMemo(() => orderedLanguageChoices(languages), [languages])
 
   const submit = useCallback(
@@ -60,13 +58,13 @@ export function OutputPicker({
   )
 
   useEffect(() => {
-    if (!changed || saving || disabled || !draft.targetLanguage) return
+    if (!changed || saving || !draft.targetLanguage) return
     saveTimer.current = setTimeout(() => submit(draft), 350)
     return () => {
       clearTimeout(saveTimer.current)
       saveTimer.current = undefined
     }
-  }, [changed, disabled, draft, saving, submit])
+  }, [changed, draft, saving, submit])
 
   useEffect(
     () => () => {
@@ -75,7 +73,6 @@ export function OutputPicker({
       if (
         current.changed &&
         !current.saving &&
-        !current.disabled &&
         current.draft.targetLanguage &&
         !sameDraft(submitted.current, current.draft)
       ) {
@@ -88,13 +85,7 @@ export function OutputPicker({
   const back = () => {
     clearTimeout(saveTimer.current)
     saveTimer.current = undefined
-    if (
-      changed &&
-      !saving &&
-      !disabled &&
-      draft.targetLanguage &&
-      !sameDraft(submitted.current, draft)
-    ) {
+    if (changed && !saving && draft.targetLanguage && !sameDraft(submitted.current, draft)) {
       submit(draft)
     }
     onBack()
@@ -125,7 +116,6 @@ export function OutputPicker({
             items={Object.fromEntries(
               languageChoices.map((language) => [language.tag, language.name]),
             )}
-            disabled={disabled}
             onValueChange={(targetLanguage) =>
               targetLanguage && setDraft((current) => ({ ...current, targetLanguage }))
             }
@@ -150,7 +140,6 @@ export function OutputPicker({
           {t('model.instructions')}
           <Textarea
             value={draft.instructions}
-            disabled={disabled}
             aria-label={t('outputPicker.instructions')}
             placeholder={t('outputPicker.instructionsPlaceholder')}
             className='max-h-20 min-h-20 resize-none overflow-y-auto text-[11px] leading-4'

@@ -1,6 +1,6 @@
 'use client'
 
-import { Folder, FolderPlus, Plus, Settings, Trash2 } from 'lucide-react'
+import { AppWindow, Folder, FolderPlus, Plus, Settings, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -65,6 +65,16 @@ export function StartView() {
     try {
       await call(commands.openProject, projectName)
       await refresh(projectKey, pagesKey, pageKey)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const openInNewWindow = async (projectName: string) => {
+    if (busy) return
+    setBusy(projectName)
+    try {
+      await call(commands.openWindow, projectName)
     } finally {
       setBusy(null)
     }
@@ -228,6 +238,28 @@ export function StartView() {
                               </span>
                             </span>
                           </button>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  type='button'
+                                  size='icon-sm'
+                                  variant='ghost'
+                                  className='size-7 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100'
+                                  aria-label={t('start.openInNewWindowLabel', {
+                                    name: project.name,
+                                  })}
+                                  onClick={() =>
+                                    void openInNewWindow(project.name).catch(() => undefined)
+                                  }
+                                  disabled={busy !== null}
+                                />
+                              }
+                            >
+                              <AppWindow className='size-3.5' />
+                            </TooltipTrigger>
+                            <TooltipContent>{t('start.openInNewWindow')}</TooltipContent>
+                          </Tooltip>
                           <Button
                             type='button'
                             size='icon-sm'

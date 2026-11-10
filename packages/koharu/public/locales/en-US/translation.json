@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "Select a page to begin.",
     "fit": "Fit Window",
+    "fitWidth": "Fit Width",
     "surface": "Koharu canvas",
     "unavailable": "WebGPU canvas unavailable"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}} stages",
     "stageCount_one": "{{count}} stage",
     "stageCount_other": "{{count}} stages",
-    "stages": "Stages",
-    "stop": "Stop",
-    "stopProcessing": "Stop processing"
+    "stages": "Stages"
   },
   "inspector": {
     "alignBottom": "Align bottom",
@@ -252,9 +251,11 @@
     "export": "Export Project",
     "file": "File",
     "fit": "Fit Window",
+    "fitWidth": "Fit Width",
     "github": "GitHub",
     "help": "Help",
     "import": "Import Pages",
+    "newWindow": "New Window",
     "process": "Process",
     "processLayers": "Process Selected Layers",
     "processPages": "Process Selected Pages",
@@ -366,7 +367,7 @@
       "description": "Fine-tune how language models generate translated text.",
       "enableReasoning": "Enable reasoning",
       "frequencyPenalty": "Frequency penalty",
-      "maxTokens": "Maximum tokens",
+      "maxTokens": "Maximum tokens per page",
       "minP": "Min P",
       "presencePenalty": "Presence penalty",
       "repeatPenalty": "Repeat penalty",
@@ -436,6 +437,21 @@
     },
     "title": "Settings",
     "translation": {
+      "batching": "Batching",
+      "batchingDescription": "Choose how pages are grouped into translation requests.",
+      "batchingMode": "Batching mode",
+      "batchingModeDescriptions": {
+        "all": "Sends every page in one request.",
+        "auto": "Groups pages to fit the model's context window and splits a request that is still too large.",
+        "custom": "Sends a fixed number of pages per request.",
+        "halving": "Sends every page in one request and splits a request that is too large in half, down to single pages."
+      },
+      "batchingModes": {
+        "all": "All pages",
+        "auto": "Auto",
+        "custom": "Custom",
+        "halving": "Halving"
+      },
       "description": "Choose any configured provider model, then apply one shared set of translation and generation options.",
       "instructionsDescription": "Names, tone, terminology, or formatting guidance.",
       "instructionsLabel": "Translation instructions",
@@ -444,6 +460,7 @@
       "modelDescription": "Provider labels identify where each model runs; connections are configured separately.",
       "modelQuantization": "Model quantization",
       "output": "Output",
+      "pagesPerRequest": "Pages per request",
       "quantization": "Quantization",
       "quantizationDescription": "Smaller formats use less memory, usually with a quality tradeoff.",
       "selectQuantization": "Select a quantization",
@@ -479,6 +496,8 @@
     "loadingProjects": "Loading projects…",
     "newDescription": "Create a clean workspace for your pages, translations, and exports.",
     "newProject": "New project",
+    "openInNewWindow": "Open in New Window",
+    "openInNewWindowLabel": "Open {{name}} in a new window",
     "projectKind": "Koharu project",
     "projectList": "Projects",
     "projectName": "Project name",

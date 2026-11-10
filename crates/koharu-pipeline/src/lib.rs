@@ -1,6 +1,7 @@
 //! In-process, scene-native model orchestration for Koharu.
 
 mod accelerator;
+mod admission;
 mod config;
 mod error;
 mod execution;
@@ -18,7 +19,8 @@ mod stage_runner;
 mod stages;
 
 pub use config::{
-    DetectionModel, InpaintingModel, OcrModel, PipelineConfig, ProcessorConfig, TranslationConfig,
+    DetectionModel, InpaintingModel, OcrModel, PipelineConfig, ProcessorConfig,
+    TranslationBatching, TranslationConfig,
 };
 pub use error::{ErrorKind, PipelineError};
 pub use pipeline::Pipeline;

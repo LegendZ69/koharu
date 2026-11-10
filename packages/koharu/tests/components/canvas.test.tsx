@@ -112,6 +112,27 @@ describe('canvas lifecycle', () => {
     expect(order).toEqual(['fetch:first', 'fetch:second', 'install:first', 'install:second'])
   })
 
+  it('activates a staged frame inside the caller presenter once its resources are installed', async () => {
+    const order: string[] = []
+    renderer.stageManifest.mockReturnValue({ token: 7, missing: ['resource'] })
+    renderer.installResource.mockImplementation(async () => {
+      order.push('install')
+    })
+    renderer.activateFrame.mockImplementation(() => {
+      order.push('activate')
+      return true
+    })
+    const present = vi.fn((generation: number, activate: () => boolean) => {
+      order.push(`present:${generation}`)
+      return activate()
+    })
+    const element = document.createElement('canvas')
+    const { result } = renderHook(() => useCanvas(element, 4, 7, present))
+
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(order).toEqual(['install', 'present:7', 'activate'])
+  })
+
   it('accepts an authoritative generation without reactivating its prefetched manifest', async () => {
     const element = document.createElement('canvas')
     const { result, rerender } = renderHook(({ generation }) => useCanvas(element, 4, generation), {

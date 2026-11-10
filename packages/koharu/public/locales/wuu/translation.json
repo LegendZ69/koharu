@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "先选一页，就好开始。",
     "fit": "适应窗口",
+    "fitWidth": "适应宽度",
     "surface": "Koharu 画布",
     "unavailable": "WebGPU 画布用弗来"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}} 个阶段",
     "stageCount_one": "{{count}} 个阶段",
     "stageCount_other": "{{count}} 个阶段",
-    "stages": "阶段",
-    "stop": "停止",
-    "stopProcessing": "停止处理"
+    "stages": "阶段"
   },
   "inspector": {
     "alignBottom": "底端对齐",
@@ -252,9 +251,11 @@
     "export": "导出项目",
     "file": "文件",
     "fit": "适应窗口",
+    "fitWidth": "适应宽度",
     "github": "GitHub",
     "help": "帮助",
     "import": "导入页面",
+    "newWindow": "新建窗口",
     "process": "处理",
     "processLayers": "处理拣中个图层",
     "processPages": "处理拣中个页面",
@@ -366,7 +367,7 @@
       "description": "微调语言模型生成译文个方式。",
       "enableReasoning": "启用推理",
       "frequencyPenalty": "频率惩罚",
-      "maxTokens": "最大令牌数",
+      "maxTokens": "每页最大令牌数",
       "minP": "Min P",
       "presencePenalty": "存在惩罚",
       "repeatPenalty": "重复惩罚",
@@ -436,6 +437,21 @@
     },
     "title": "设置",
     "translation": {
+      "batching": "批处理",
+      "batchingDescription": "选页面哪能分组放进翻译请求。",
+      "batchingMode": "批处理模式",
+      "batchingModeDescriptions": {
+        "all": "一个请求里向发出所有页面。",
+        "auto": "照模型个上下文窗口拿页面分组，请求还是忒大就拆开。",
+        "custom": "每个请求发固定数量个页面。",
+        "halving": "一个请求里向发出所有页面；请求忒大就对半拆开，一直拆到单页。"
+      },
+      "batchingModes": {
+        "all": "全部页面",
+        "auto": "自动",
+        "custom": "自定义",
+        "halving": "对半拆开"
+      },
       "description": "先选已经配置好个提供商底下个模型，再设置各个模型共用个翻译搭生成选项。",
       "instructionsDescription": "名字、语气、术语或者格式个说明。",
       "instructionsLabel": "翻译说明",
@@ -444,6 +460,7 @@
       "modelDescription": "提供商标签标明各个模型来勒啥地方运行；连接要另外配置。",
       "modelQuantization": "模型量化",
       "output": "输出",
+      "pagesPerRequest": "每个请求个页数",
       "quantization": "量化",
       "quantizationDescription": "体积小点个格式，占用个内存少点，通常会有质量损失。",
       "selectQuantization": "选量化方式",
@@ -479,6 +496,8 @@
     "loadingProjects": "来勒加载项目…",
     "newDescription": "建一个清爽个工作区，用来放页面、译文搭导出文件。",
     "newProject": "新建项目",
+    "openInNewWindow": "勒新窗口里向打开",
+    "openInNewWindowLabel": "勒新窗口里向打开 {{name}}",
     "projectKind": "Koharu 项目",
     "projectList": "项目",
     "projectName": "项目名称",

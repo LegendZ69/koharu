@@ -20,7 +20,6 @@ export function ModelPicker({
   models,
   providers,
   loading = false,
-  disabled = false,
   busyModel,
   onBack,
   onSelect,
@@ -29,7 +28,6 @@ export function ModelPicker({
   models: Model[]
   providers: ProviderPreference[]
   loading?: boolean
-  disabled?: boolean
   busyModel?: string | null
   onBack: () => void
   onSelect: (model: ModelSelection) => void
@@ -132,7 +130,7 @@ export function ModelPicker({
                     : t('modelPicker.useModel', { model: model.name, provider })
                 }
                 aria-pressed={selected}
-                disabled={disabled || saving}
+                disabled={saving}
                 className='h-auto min-h-9 w-full max-w-full min-w-0 justify-start gap-2 overflow-hidden rounded-lg px-2 py-1 text-left font-normal hover:bg-primary/10'
                 onClick={() => {
                   if (expandable) setPendingKey(key)

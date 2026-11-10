@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "اختر صفحة للبدء.",
     "fit": "ملاءمة النافذة",
+    "fitWidth": "ملاءمة العرض",
     "surface": "لوحة Koharu",
     "unavailable": "لوحة WebGPU غير متاحة"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}} من المراحل",
     "stageCount_one": "{{count}} مرحلة",
     "stageCount_other": "{{count}} من المراحل",
-    "stages": "المراحل",
-    "stop": "إيقاف",
-    "stopProcessing": "إيقاف المعالجة"
+    "stages": "المراحل"
   },
   "inspector": {
     "alignBottom": "محاذاة للأسفل",
@@ -252,9 +251,11 @@
     "export": "تصدير المشروع",
     "file": "ملف",
     "fit": "ملاءمة النافذة",
+    "fitWidth": "ملاءمة العرض",
     "github": "GitHub",
     "help": "مساعدة",
     "import": "استيراد الصفحات",
+    "newWindow": "نافذة جديدة",
     "process": "معالجة",
     "processLayers": "معالجة الطبقات المحدّدة",
     "processPages": "معالجة الصفحات المحدّدة",
@@ -366,7 +367,7 @@
       "description": "اضبط طريقة توليد النماذج اللغوية للنص المترجم.",
       "enableReasoning": "تفعيل التفكير",
       "frequencyPenalty": "Frequency penalty",
-      "maxTokens": "Maximum tokens",
+      "maxTokens": "الحد الأقصى للرموز لكل صفحة",
       "minP": "Min P",
       "presencePenalty": "Presence penalty",
       "repeatPenalty": "Repeat penalty",
@@ -436,6 +437,21 @@
     },
     "title": "الإعدادات",
     "translation": {
+      "batching": "المعالجة على دفعات",
+      "batchingDescription": "اختر طريقة تجميع الصفحات في طلبات الترجمة.",
+      "batchingMode": "وضع التجميع",
+      "batchingModeDescriptions": {
+        "all": "يرسل كل الصفحات في طلب واحد.",
+        "auto": "يجمّع الصفحات بما يناسب نافذة سياق النموذج، ويقسّم الطلب الذي يظل كبيرًا جدًا.",
+        "custom": "يرسل عددًا ثابتًا من الصفحات في كل طلب.",
+        "halving": "يرسل كل الصفحات في طلب واحد، ويقسم الطلب الكبير جدًا إلى نصفين حتى يصل إلى صفحات منفردة."
+      },
+      "batchingModes": {
+        "all": "كل الصفحات",
+        "auto": "تلقائي",
+        "custom": "مخصّص",
+        "halving": "التنصيف"
+      },
       "description": "اختر أي نموذج مزوّد مهيّأ، ثم طبّق مجموعة موحّدة من خيارات الترجمة والتوليد.",
       "instructionsDescription": "إرشادات الأسماء أو النبرة أو المصطلحات أو التنسيق.",
       "instructionsLabel": "تعليمات الترجمة",
@@ -444,6 +460,7 @@
       "modelDescription": "تشير تسميات المزوّد إلى مكان تشغيل كل نموذج؛ وتُهيَّأ الاتصالات بشكل منفصل.",
       "modelQuantization": "تكميم النموذج",
       "output": "الإخراج",
+      "pagesPerRequest": "عدد الصفحات في كل طلب",
       "quantization": "التكميم",
       "quantizationDescription": "تستخدم الصيغ الأصغر ذاكرة أقل، مع مقايضة في الجودة عادةً.",
       "selectQuantization": "اختر تكميمًا",
@@ -479,6 +496,8 @@
     "loadingProjects": "جارٍ تحميل المشاريع…",
     "newDescription": "أنشئ مساحة عمل نظيفة لصفحاتك وترجماتك وعمليات التصدير.",
     "newProject": "مشروع جديد",
+    "openInNewWindow": "فتح في نافذة جديدة",
+    "openInNewWindowLabel": "فتح {{name}} في نافذة جديدة",
     "projectKind": "مشروع Koharu",
     "projectList": "المشاريع",
     "projectName": "اسم المشروع",

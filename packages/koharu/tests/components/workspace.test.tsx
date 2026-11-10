@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CanvasWorkspace } from '@/components/editor/CanvasWorkspace'
 import { pageKey, pagesKey, projectKey, queryClient } from '@/lib/queries'
-import { useKoharuStore } from '@/lib/store'
-import { commands, type Layer } from '@koharu/bridge/protocol'
+import { receiveJob, useKoharuStore } from '@/lib/store'
+import { commands, type Job, type Layer } from '@koharu/bridge/protocol'
 import { TooltipProvider } from '@koharu/ui/components/tooltip'
 
 const canvas = vi.hoisted(() => ({
@@ -37,10 +37,22 @@ const canvasState = vi.hoisted(() => ({
   retry: vi.fn(),
   status: 'ready' as 'loading' | 'switching' | 'ready' | 'recovering' | 'error',
 }))
+// The workspace's presenter of staged frames, as the mocked useCanvas last received it.
+const presenter = vi.hoisted(() => ({
+  present: (_generation: number, activate: () => boolean) => activate(),
+}))
 const prefetchCanvasPages = vi.hoisted(() => vi.fn(async () => []))
 
 vi.mock('@/components/editor/useCanvas', () => ({
-  useCanvas: () => canvasState,
+  useCanvas: (
+    _element: HTMLCanvasElement | null,
+    _revision: number | null,
+    _generation: number,
+    present: typeof presenter.present,
+  ) => {
+    presenter.present = present
+    return canvasState
+  },
 }))
 vi.mock('@koharu/bridge/canvas', () => ({
   prefetchCanvasPages,
@@ -71,6 +83,17 @@ const paintLayer: Layer = {
   image: 'paint-image',
   name: 'Paint 1',
   kind: 'paint',
+}
+
+const inpaintJob: Job = {
+  id: 'job',
+  state: 'running',
+  completed: 0,
+  total: 1,
+  page: 'page',
+  stage: 'inpainting',
+  model: null,
+  error: null,
 }
 
 let nextAnimationFrame = 1
@@ -178,20 +201,104 @@ describe('canvas interaction adapter', () => {
   it('preserves a manual camera when a newer canvas generation becomes ready', () => {
     installProject()
     renderWorkspace()
-    const camera = { zoom: 2, translation: [-120, -80] as [number, number], fitted: false }
+    const camera = { zoom: 2, translation: [-120, -80] as [number, number], fit: null }
 
     act(() => useKoharuStore.setState({ camera }))
     act(() => {
       canvasState.status = 'switching'
       useKoharuStore.setState({ canvasGeneration: 2 })
     })
+    const activate = vi.fn(() => true)
+    act(() => void presenter.present(2, activate))
     act(() => {
       canvasState.status = 'ready'
       canvasState.generation = 2
       useKoharuStore.setState({ canvasRevision: 2 })
     })
 
+    expect(activate).toHaveBeenCalledOnce()
     expect(useKoharuStore.getState().camera).toEqual(camera)
+  })
+
+  it('scrolls a width fit vertically, refits it on the next page, and drops it on zoom', async () => {
+    installProject()
+    queryClient.setQueryData(pageKey, (page: { size: { width: number; height: number } }) => ({
+      ...page,
+      size: { width: 1000, height: 2000 },
+    }))
+    useKoharuStore.setState({ canvasSize: [1000, 2000] })
+    const surface = renderWorkspace()
+    fireEvent(window, new Event('resize'))
+    const camera = () => useKoharuStore.getState().camera
+
+    // 800 CSS px at dpr 1 leaves 720 px between the insets; the tall page starts at its top.
+    fireEvent.keyDown(window, { key: 'w' })
+    expect(camera()).toEqual({ zoom: 0.72, translation: [64, 16], fit: 'width' })
+
+    fireEvent.wheel(surface, { deltaX: 30, deltaY: 100 })
+    expect(camera()).toEqual({ zoom: 0.72, translation: [64, -84], fit: 'width' })
+    fireEvent.wheel(surface, { deltaY: -500 })
+    expect(camera().translation).toEqual([64, 16])
+
+    act(() => useKoharuStore.setState({ tool: 'pan' }))
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 15, clientX: 100, clientY: 300 })
+    fireEvent.pointerMove(surface, { pointerId: 15, clientX: 300, clientY: 250 })
+    fireEvent.pointerUp(surface, { pointerId: 15, clientX: 300, clientY: 250 })
+    expect(camera()).toEqual({ zoom: 0.72, translation: [64, -34], fit: 'width' })
+
+    act(() => {
+      canvasState.generation = 2
+      useKoharuStore.setState({ canvasGeneration: 2, canvasRevision: 2 })
+    })
+    expect(camera()).toEqual({ zoom: 0.72, translation: [64, -34], fit: 'width' })
+
+    // An uncached page reaches the query and the native canvas before its frame is presented.
+    await act(async () => {
+      queryClient.setQueryData(pageKey, {
+        id: 'next',
+        label: 'Next',
+        size: { width: 500, height: 2000 },
+        layers: [],
+        regions: [],
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    act(() =>
+      useKoharuStore.setState({ canvasPage: 'next', canvasGeneration: 3, canvasSize: [500, 2000] }),
+    )
+    expect(camera()).toEqual({ zoom: 0.72, translation: [64, -34], fit: 'width' })
+
+    // Its first frame is activated with its own fitted view on the canvas. A frame that is not
+    // activated hands the camera back to the page still shown.
+    const views: unknown[] = []
+    const activation = (activated: boolean) => () => {
+      views.push(canvas.setView.mock.lastCall)
+      return activated
+    }
+    act(() => void presenter.present(3, activation(false)))
+    expect(camera()).toEqual({ zoom: 0.72, translation: [64, -34], fit: 'width' })
+    expect(canvas.setView).toHaveBeenLastCalledWith(0.72, [64, -34])
+    act(() => void presenter.present(3, activation(true)))
+    expect(views).toEqual([
+      [1.44, [64, 16]],
+      [1.44, [64, 16]],
+    ])
+    expect(camera()).toEqual({ zoom: 1.44, translation: [64, 16], fit: 'width' })
+
+    // A newer generation of that page can be presented before the workspace sees the first one on
+    // screen. The page keeps its camera, scroll included.
+    fireEvent.wheel(surface, { deltaY: 100 })
+    act(() => useKoharuStore.setState({ canvasGeneration: 4 }))
+    act(() => void presenter.present(4, () => true))
+    act(() => {
+      canvasState.generation = 4
+      useKoharuStore.setState({ canvasRevision: 4 })
+    })
+    expect(camera()).toEqual({ zoom: 1.44, translation: [64, -84], fit: 'width' })
+
+    fireEvent.wheel(surface, { clientX: 100, clientY: 100, ctrlKey: true, deltaY: -100 })
+    expect(camera().fit).toBeNull()
+    expect(useKoharuStore.getState().fitMode).toBe('width')
   })
 
   it('suppresses Alt browser handling while an editor input retains focus', () => {
@@ -472,6 +579,86 @@ describe('canvas interaction adapter', () => {
       diameter: 48,
     })
     expect(commit).toHaveBeenCalledWith(1, expect.arrayContaining([{ x: 20, y: 20 }]), 48)
+  })
+
+  it.each([
+    ['fails', 'failed'],
+    ['is stopped', 'stopped'],
+  ] as const)('releases a pending Remove stroke when its job %s', async (_name, state) => {
+    installProject()
+    useKoharuStore.setState({ tool: 'remove' })
+    const commit = vi.spyOn(commands, 'commitInpaint').mockResolvedValue('job')
+    receiveJob(inpaintJob)
+    const surface = renderWorkspace()
+
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 16, clientX: 30, clientY: 40 })
+    fireEvent.pointerUp(surface, { pointerId: 16, clientX: 30, clientY: 40 })
+    await waitFor(() => expect(commit).toHaveBeenCalledOnce())
+    await act(async () => undefined)
+    expect(canvas.cancelStroke).not.toHaveBeenCalled()
+
+    act(() => receiveJob({ ...inpaintJob, state }))
+    expect(canvas.cancelStroke).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['fails', 'failed'],
+    ['is stopped', 'stopped'],
+  ] as const)(
+    'keeps a Remove stroke pending while its job is unreported, until the job %s',
+    async (_name, state) => {
+      installProject()
+      useKoharuStore.setState({ tool: 'remove' })
+      const commit = vi.spyOn(commands, 'commitInpaint').mockResolvedValue('job')
+      const surface = renderWorkspace()
+
+      fireEvent.pointerDown(surface, { button: 0, pointerId: 18, clientX: 30, clientY: 40 })
+      fireEvent.pointerUp(surface, { pointerId: 18, clientX: 30, clientY: 40 })
+      await waitFor(() => expect(commit).toHaveBeenCalledOnce())
+      await act(async () => undefined)
+      act(() => receiveJob(inpaintJob))
+      expect(canvas.cancelStroke).not.toHaveBeenCalled()
+
+      act(() => receiveJob({ ...inpaintJob, state }))
+      expect(canvas.cancelStroke).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('releases a Remove stroke whose job ended before its commit returned', async () => {
+    installProject()
+    useKoharuStore.setState({ tool: 'remove' })
+    const result = Promise.withResolvers<string | null>()
+    const commit = vi.spyOn(commands, 'commitInpaint').mockReturnValue(result.promise)
+    const surface = renderWorkspace()
+
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 19, clientX: 30, clientY: 40 })
+    fireEvent.pointerUp(surface, { pointerId: 19, clientX: 30, clientY: 40 })
+    await waitFor(() => expect(commit).toHaveBeenCalledOnce())
+    act(() => {
+      receiveJob(inpaintJob)
+      receiveJob({ ...inpaintJob, state: 'stopped' })
+    })
+    expect(canvas.cancelStroke).not.toHaveBeenCalled()
+
+    await act(async () => result.resolve('job'))
+    await waitFor(() => expect(canvas.cancelStroke).toHaveBeenCalledOnce())
+  })
+
+  it('leaves a pending Remove stroke to the newer revision its job commits', async () => {
+    installProject()
+    useKoharuStore.setState({ tool: 'remove' })
+    const commit = vi.spyOn(commands, 'commitInpaint').mockResolvedValue('job')
+    receiveJob(inpaintJob)
+    const surface = renderWorkspace()
+
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 17, clientX: 30, clientY: 40 })
+    fireEvent.pointerUp(surface, { pointerId: 17, clientX: 30, clientY: 40 })
+    await waitFor(() => expect(commit).toHaveBeenCalledOnce())
+    await act(async () => undefined)
+
+    act(() => useKoharuStore.setState({ canvasRevision: 2, canvasGeneration: 2 }))
+    act(() => receiveJob({ ...inpaintJob, state: 'finished', completed: 1 }))
+    expect(canvas.cancelStroke).not.toHaveBeenCalled()
   })
 
   it('creates point text on click and paragraph text on drag', async () => {

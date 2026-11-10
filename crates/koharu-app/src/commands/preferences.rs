@@ -7,8 +7,10 @@ use koharu_secrets::ExposeSecret as _;
 use koharu_translator::{Language, Model, Provider, ProviderConfig, ProvidersConfig};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use tauri::{Manager as _, WebviewWindow};
+use tauri_runtime_cef::CefRuntime;
 
-use super::Error;
+use super::{ChannelExt as _, Error, workspace::Workspaces};
 
 #[derive(Clone, Debug, Serialize, Type)]
 pub struct Preferences {
@@ -154,6 +156,7 @@ pub(crate) async fn save_preferences(
     mut pipeline: PipelineConfig,
     providers: ProviderPreferences,
     typesetting: TypesettingConfig,
+    window: WebviewWindow<CefRuntime>,
 ) -> std::result::Result<Preferences, Error> {
     remember_pipeline_profiles(&mut pipeline);
     let providers = providers.into_config()?;
@@ -175,7 +178,13 @@ pub(crate) async fn save_preferences(
         *current = typesetting;
         current.save()?;
     }
-    Ok(Preferences::load()?)
+    let preferences = Preferences::load()?;
+    for workspace in window.state::<Workspaces>().all() {
+        if workspace.label != window.label() {
+            workspace.channels.preferences.publish(preferences.clone());
+        }
+    }
+    Ok(preferences)
 }
 
 fn remember_pipeline_profiles(config: &mut PipelineConfig) {

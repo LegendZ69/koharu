@@ -174,6 +174,19 @@ describe('Tauri runtime', () => {
     dispose()
   })
 
+  it('applies preferences saved in another window', async () => {
+    const { binding, dispose } = await start()
+    const preferencesChannel = binding.mock.calls[0][5]
+    const saved: Preferences = {
+      ...preferences,
+      typesetting: { font_families: ['Noto Sans'] },
+    }
+
+    preferencesChannel.onmessage(saved)
+    expect(useKoharuStore.getState().preferences).toBe(saved)
+    dispose()
+  })
+
   it('refreshes project queries when an autonomous job commits work', async () => {
     vi.spyOn(commands, 'getProject').mockResolvedValueOnce(null).mockResolvedValue(project)
     const binding = vi.spyOn(commands, 'subscribe').mockResolvedValue(startupState())

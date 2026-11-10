@@ -178,6 +178,13 @@ pub struct TranslationConfig {
     #[specta(type = String)]
     pub target_language: Language,
     pub instructions: Option<String>,
+    // A saved translation table whose model differs from the default replaces the default
+    // table whole, so every field added later needs its own serde default.
+    #[serde(default)]
+    pub batching: TranslationBatching,
+    /// Pages per request in `TranslationBatching::Custom`; values below one act as one.
+    #[serde(default = "default_pages_per_request")]
+    pub pages_per_request: u32,
 }
 
 impl Default for TranslationConfig {
@@ -187,8 +194,31 @@ impl Default for TranslationConfig {
             generation: GenerationConfig::default(),
             target_language: Language::English,
             instructions: None,
+            batching: TranslationBatching::default(),
+            pages_per_request: default_pages_per_request(),
         }
     }
+}
+
+const fn default_pages_per_request() -> u32 {
+    4
+}
+
+/// How the translation stage groups pages into provider requests.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationBatching {
+    /// Every page of a run in one request.
+    All,
+    /// Every page of a run in one request; a request that is too large splits into halves,
+    /// down to single pages.
+    Halving,
+    /// `pages_per_request` pages per request.
+    Custom,
+    /// Requests sized to the model's context budget; a request that is still too large
+    /// splits into halves.
+    #[default]
+    Auto,
 }
 
 impl PipelineConfig {
@@ -454,5 +484,37 @@ mod tests {
             restored.inpainting().unwrap(),
             InpaintingModel::Flux2Klein(config) if config.prompt == "Keep the line art."
         ));
+    }
+
+    #[test]
+    fn translation_batching_round_trips_and_defaults_when_missing() {
+        let config = PipelineConfig {
+            translation: TranslationConfig {
+                batching: TranslationBatching::Custom,
+                pages_per_request: 7,
+                ..TranslationConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let document = toml::to_string(&config).unwrap();
+        assert!(document.contains("batching = \"custom\""));
+        let restored = toml::from_str::<PipelineConfig>(&document).unwrap();
+        assert_eq!(restored.translation, config.translation);
+
+        let saved = toml::from_str::<PipelineConfig>(
+            r#"
+                [translation]
+                target_language = "ja-JP"
+
+                [translation.model]
+                provider = "openai"
+                model = "gpt-5.6-luna"
+
+                [translation.generation]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(saved.translation.batching, TranslationBatching::Auto);
+        assert_eq!(saved.translation.pages_per_request, 4);
     }
 }

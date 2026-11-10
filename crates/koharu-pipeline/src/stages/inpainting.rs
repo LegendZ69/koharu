@@ -24,7 +24,7 @@ use koharu_scene::{
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::{StageInput, StageProcessor, finish, generation};
+use super::{StageInput, StageLifecycle, finish, generation};
 use crate::{InpaintingModel, ModelCell};
 
 const PRODUCER: &str = "dev.koharu.pipeline.inpainting";
@@ -60,7 +60,7 @@ impl Default for RoremMixedConfig {
 }
 
 pub(super) struct Processor {
-    config: InpaintingModel,
+    pub(super) config: InpaintingModel,
     device: koharu_ml::Device,
     model: ModelCell<Model>,
 }
@@ -92,7 +92,7 @@ impl Processor {
 }
 
 #[async_trait]
-impl StageProcessor for Processor {
+impl StageLifecycle for Processor {
     fn model(&self) -> &'static str {
         match self.config {
             InpaintingModel::LaMa {} => "lama",
@@ -129,8 +129,10 @@ impl StageProcessor for Processor {
             .ensure(|| Model::load(self.device.clone(), &self.config))
             .await
     }
+}
 
-    async fn process(&self, input: StageInput) -> Result<koharu_scene::Patch> {
+impl Processor {
+    pub(super) async fn process(&self, input: StageInput) -> Result<koharu_scene::Patch> {
         self.model
             .lock()
             .await

@@ -11,11 +11,13 @@ use url::Url;
 
 use super::send_json;
 use crate::{
-    GenerationConfig as TranslationGeneration, Model, Provider, Result, TranslationRequest,
-    backend::encode_image, prompt,
+    GenerationConfig as TranslationGeneration, Model, PageImage, Provider, Result,
+    TranslationRequest, backend::Translations, batch::Batching, prompt,
 };
 
 const ROOT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// Context window assumed for Gemini models.
+pub(super) const BATCHING: Batching = Batching::prompt(1_000_000);
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -79,7 +81,7 @@ pub(super) async fn translate(
     model: &str,
     generation: &TranslationGeneration,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("gemini")?.context("gemini API key is not configured")?;
     let (system, user) = prompt::prompts(request)?;
     let schema = prompt::output_schema(request.segments.len());
@@ -89,7 +91,7 @@ pub(super) async fn translate(
         .append_pair("key", api_key.expose_secret());
     let body = Request {
         system_instruction: Content::text(&system),
-        contents: [Content::user(&user, request.image.as_deref())?],
+        contents: [Content::user(&user, &request.images)?],
         generation_config: GenerationConfig {
             temperature: generation.temperature,
             max_output_tokens: generation.max_tokens,
@@ -124,7 +126,7 @@ pub(super) async fn translate(
         .and_then(|candidate| candidate.content.parts.into_iter().next())
         .context("Gemini returned no candidate content")?
         .text;
-    Ok(prompt::translations("gemini", &text, &request.segments)?)
+    prompt::translations("gemini", &text, &request.segments)
 }
 
 #[derive(Serialize)]
@@ -146,13 +148,13 @@ impl<'a> Content<'a> {
         }
     }
 
-    fn user(text: &'a str, image: Option<&image::DynamicImage>) -> anyhow::Result<Self> {
+    fn user(text: &'a str, images: &'a [PageImage]) -> anyhow::Result<Self> {
         let mut parts = vec![Part::Text { text }];
-        if let Some(image) = image {
+        for image in images {
             parts.push(Part::InlineData {
                 inline_data: InlineData {
                     mime_type: "image/jpeg",
-                    data: encode_image(image)?.data,
+                    data: image.base64()?,
                 },
             });
         }
@@ -168,15 +170,15 @@ enum Part<'a> {
     },
     InlineData {
         #[serde(rename = "inlineData")]
-        inline_data: InlineData,
+        inline_data: InlineData<'a>,
     },
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InlineData {
+struct InlineData<'a> {
     mime_type: &'static str,
-    data: String,
+    data: &'a str,
 }
 
 #[derive(Serialize)]
@@ -288,12 +290,15 @@ mod tests {
 
     #[test]
     fn serializes_text_and_inline_image_parts() {
-        let content =
-            Content::user("translate", Some(&image::DynamicImage::new_rgb8(1, 1))).unwrap();
+        let request = TranslationRequest::encoded_pages([image::DynamicImage::new_rgb8(1, 1)]);
+        let content = Content::user("translate", &request.images).unwrap();
         let value = serde_json::to_value(content).unwrap();
         assert_eq!(value["parts"][0]["text"], "translate");
         assert_eq!(value["parts"][1]["inlineData"]["mimeType"], "image/jpeg");
-        assert!(value["parts"][1]["inlineData"]["data"].is_string());
+        assert_eq!(
+            value["parts"][1]["inlineData"]["data"],
+            request.images[0].base64().unwrap()
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ icon: 'layer-group'
 
 ## Schedule the fixed pipeline
 
-`koharu-pipeline` schedules one stage on one page as its execution unit:
+`koharu-pipeline` schedules one stage on one page as its execution unit; translation runs on a batch of pages:
 
 ```mermaid
 flowchart LR
@@ -14,15 +14,15 @@ flowchart LR
   detection --> inpainting["Inpainting"]
 ```
 
-Pages enter in project order. Completed detection makes that page's dependent branches eligible immediately, without waiting for detection on the whole project. At most one job per stage runs at a time, and the number of pages in flight is bounded by the number of selected stages.
+Pages enter in project order. Completed detection makes that page's dependent branches eligible immediately, without waiting for detection on the whole project. At most one job per stage runs at a time across all concurrent runs, and the pages in flight that still have detection, OCR, or inpainting to finish form a rolling window bounded by the number of selected stages. A translation batch, chosen by the batching mode, is eligible once its pages finished OCR. A page waiting only for its translation batch is parked outside that window, so a batch can hold more pages than the window.
 
 Stages return semantic patches. The application commits each result, synchronizes the canvas, and records each commit as its own undo step.
 
 ## Manage residency and stopping
 
-Accelerator inference uses one admission lane: representative heterogeneous overlap reduced throughput through compute and memory-bandwidth contention. The translation stage takes the lane for every provider, including remote APIs. CPU-only work can keep independent per-model lanes.
+Accelerator inference uses one admission lane: representative heterogeneous overlap reduced throughput through compute and memory-bandwidth contention. Every concurrent run shares the lane. Local translation takes it; remote providers do not. CPU-only work can keep independent per-model lanes.
 
-Models load lazily and remain reusable. When a stage fails with an out-of-memory error, the runner releases the accelerator lane, unloads the other stages' models, waits briefly for a fresh resource sample, and retries once. Any other failure unloads the failing stage's model. A settings change rebuilds the stage runner, so models reload on the next run.
+Models load lazily and remain reusable. When a stage fails with an out-of-memory error, the runner releases the accelerator lane, unloads the other stages' models, waits briefly for a fresh resource sample, and retries once. Any other failure unloads the failing stage's model. A settings change rebuilds only the stages whose settings changed; the others keep their loaded models.
 
 Stopping is cooperative. New stages do not start after a stop request. Active native inference returns safely; an uncommitted result is discarded.
 

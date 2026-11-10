@@ -8,9 +8,13 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::send_json;
-use crate::{Model, Provider, Result, TranslationRequest};
+use crate::{Error, Model, Provider, Result, TranslationRequest, batch::Batching};
 
 const URL: &str = "https://translation.googleapis.com/language/translate/v2";
+/// Requests are chunked below, so this window only sizes page batches.
+pub(super) const BATCHING: Batching = Batching::chunked(128_000);
+/// Cloud Translation v2 accepts at most 128 `q` strings per request.
+const MAX_QUERIES: usize = 128;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -39,22 +43,38 @@ pub(super) async fn translate(
     let mut url = Url::parse(URL).expect("Google API URL is valid");
     url.query_pairs_mut()
         .append_pair("key", api_key.expose_secret());
-    let response: Response = send_json(
-        "google-cloud-translation",
-        client.post(url).json(&Request {
-            q: &request.segments,
-            target: request.target_language.tag(),
-            source: request.source_language.map(|language| language.tag()),
-            format: "text",
-        }),
-    )
-    .await?;
-    Ok(response
-        .data
-        .translations
-        .into_iter()
-        .map(|translation| translation.translated_text)
-        .collect())
+    let mut translations = Vec::with_capacity(request.segments.len());
+    for body in requests(request) {
+        let response: Response = send_json(
+            "google-cloud-translation",
+            client.post(url.clone()).json(&body),
+        )
+        .await?;
+        let chunk = response.data.translations;
+        if chunk.len() != body.q.len() {
+            return Err(Error::SegmentCount {
+                provider: "google-cloud-translation",
+                expected: body.q.len(),
+                actual: chunk.len(),
+            });
+        }
+        translations.extend(
+            chunk
+                .into_iter()
+                .map(|translation| translation.translated_text),
+        );
+    }
+    Ok(translations)
+}
+
+/// One request body per [`MAX_QUERIES`] segments.
+fn requests(request: &TranslationRequest) -> impl Iterator<Item = Request<'_>> {
+    request.segments.chunks(MAX_QUERIES).map(|q| Request {
+        q,
+        target: request.target_language.tag(),
+        source: request.source_language.map(|language| language.tag()),
+        format: "text",
+    })
 }
 
 #[derive(Serialize)]
@@ -80,4 +100,25 @@ struct Data {
 struct Translation {
     #[serde(rename = "translatedText")]
     translated_text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Language;
+
+    #[test]
+    fn splits_segments_into_requests_of_at_most_128() {
+        let segments = (0..300).map(|index| index.to_string());
+        let request = TranslationRequest::new(segments, Language::English);
+        let bodies: Vec<_> = requests(&request).collect();
+
+        let sizes: Vec<_> = bodies.iter().map(|body| body.q.len()).collect();
+        assert_eq!(sizes, [128, 128, 44]);
+        let value = serde_json::to_value(&bodies[2]).unwrap();
+        assert_eq!(value["q"][0], "256");
+        assert_eq!(value["target"], "en-US");
+        assert_eq!(value["format"], "text");
+        assert!(value.get("source").is_none());
+    }
 }

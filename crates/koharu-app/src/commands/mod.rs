@@ -8,6 +8,7 @@ pub(crate) mod output;
 pub(crate) mod preferences;
 pub(crate) mod processing;
 pub(crate) mod project;
+pub(crate) mod workspace;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -72,6 +73,7 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             lifecycle::open_project,
             lifecycle::delete_project,
             lifecycle::close_project,
+            lifecycle::open_window,
             lifecycle::import,
             lifecycle::select_page,
             editing::rename_page,

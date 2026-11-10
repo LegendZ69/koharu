@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next'
 
 import { AboutDialog } from '@/components/app/AboutDialog'
 import { useMacOS, WindowControls } from '@/components/app/WindowChrome'
-import { call } from '@/lib/backend'
+import { call, dispatch } from '@/lib/backend'
 import { selectableLayer } from '@/lib/geometry'
 import {
   pageKey,
@@ -28,6 +28,8 @@ import {
   MenubarContent as UiMenubarContent,
   MenubarItem as UiMenubarItem,
   MenubarMenu,
+  MenubarRadioGroup,
+  MenubarRadioItem as UiMenubarRadioItem,
   MenubarSeparator as UiMenubarSeparator,
   MenubarShortcut as UiMenubarShortcut,
   MenubarSub,
@@ -50,6 +52,8 @@ export function TitleBar() {
   const selectedLayers = useKoharuStore((state) => state.selectedLayers)
   const selectLayers = useKoharuStore((state) => state.selectLayers)
   const setSettingsOpen = useKoharuStore((state) => state.setSettingsOpen)
+  const fitMode = useKoharuStore((state) => state.fitMode)
+  const shortcuts = useKoharuStore((state) => state.shortcuts)
   const requestCanvasFit = useKoharuStore((state) => state.requestCanvasFit)
   const { importPages, importing } = useImportPages()
   const { run: exportProject, busy: exporting } = useCommand(
@@ -88,6 +92,10 @@ export function TitleBar() {
           <MenubarMenu>
             <MenubarTrigger>{t('menu.file')}</MenubarTrigger>
             <MenubarContent>
+              <MenubarItem onClick={() => dispatch(commands.openWindow, null)}>
+                {t('menu.newWindow')}
+              </MenubarItem>
+              <MenubarSeparator />
               <MenubarSub>
                 <MenubarSubTrigger
                   disabled={!project || importing}
@@ -235,9 +243,26 @@ export function TitleBar() {
           <MenubarMenu>
             <MenubarTrigger>{t('menu.view')}</MenubarTrigger>
             <MenubarContent>
-              <MenubarItem disabled={!page} onClick={requestCanvasFit}>
-                {t('menu.fit')}
-              </MenubarItem>
+              {/* Choosing the checked mode applies it again, so each item requests on click
+                  rather than on a value change. */}
+              <MenubarRadioGroup value={fitMode} disabled={!page}>
+                <MenubarRadioItem
+                  value='page'
+                  closeOnClick
+                  onClick={() => requestCanvasFit('page')}
+                >
+                  {t('menu.fit')}
+                  <MenubarShortcut>{shortcuts.fit.toUpperCase()}</MenubarShortcut>
+                </MenubarRadioItem>
+                <MenubarRadioItem
+                  value='width'
+                  closeOnClick
+                  onClick={() => requestCanvasFit('width')}
+                >
+                  {t('menu.fitWidth')}
+                  <MenubarShortcut>{shortcuts.fitWidth.toUpperCase()}</MenubarShortcut>
+                </MenubarRadioItem>
+              </MenubarRadioGroup>
             </MenubarContent>
           </MenubarMenu>
 
@@ -307,6 +332,18 @@ function MenubarItem({ className, ...props }: ComponentProps<typeof UiMenubarIte
     <UiMenubarItem
       className={cn(
         "min-h-8 gap-1.5 px-2 py-1 text-xs [&_svg:not([class*='size-'])]:size-3.5",
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function MenubarRadioItem({ className, ...props }: ComponentProps<typeof UiMenubarRadioItem>) {
+  return (
+    <UiMenubarRadioItem
+      className={cn(
+        "min-h-8 gap-1.5 py-1 pr-2 pl-7 text-xs [&_svg:not([class*='size-'])]:size-3.5",
         className,
       )}
       {...props}

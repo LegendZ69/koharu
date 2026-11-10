@@ -10,11 +10,18 @@ use serde::{Deserialize, Serialize};
 
 use super::send_json;
 use crate::{
-    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::encode_image, prompt,
+    GenerationConfig, Model, PageImage, Provider, Result, TranslationRequest,
+    backend::Translations,
+    batch::{self, Batching},
+    prompt,
 };
 
 const URL: &str = "https://api.anthropic.com/v1/messages";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=1000";
+/// Context window assumed for Claude models.
+pub(super) const BATCHING: Batching = Batching::prompt(200_000);
+/// Output budget per page when none is set; the Messages API requires one.
+const MAX_TOKENS: usize = 8_192;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -55,14 +62,16 @@ pub(super) async fn translate(
     model: &str,
     generation: &GenerationConfig,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("claude")?.context("claude API key is not configured")?;
     let (system, user) = prompt::prompts(request)?;
     let body = Request {
         model,
-        max_tokens: generation.max_tokens.unwrap_or(8192),
+        max_tokens: generation
+            .max_tokens
+            .unwrap_or_else(|| batch::output_tokens(MAX_TOKENS, request.page_count) as u32),
         system: &system,
-        messages: [Message::user(&user, request.image.as_deref())?],
+        messages: [Message::user(&user, &request.images)?],
         temperature: generation.temperature,
         thinking: generation.reasoning.map(|enabled| ThinkingConfig {
             kind: if enabled { "adaptive" } else { "disabled" },
@@ -88,7 +97,7 @@ pub(super) async fn translate(
         .into_iter()
         .find_map(|block| (block.kind == "text").then_some(block.text).flatten())
         .context("Claude returned no text content")?;
-    Ok(prompt::translations("claude", &text, &request.segments)?)
+    prompt::translations("claude", &text, &request.segments)
 }
 
 #[derive(Serialize)]
@@ -129,14 +138,14 @@ struct Message<'a> {
 }
 
 impl<'a> Message<'a> {
-    fn user(text: &'a str, image: Option<&image::DynamicImage>) -> anyhow::Result<Self> {
+    fn user(text: &'a str, images: &'a [PageImage]) -> anyhow::Result<Self> {
         let mut content = vec![ContentBlock::Text { text }];
-        if let Some(image) = image {
+        for image in images {
             content.push(ContentBlock::Image {
                 source: ImageSource {
                     kind: "base64",
                     media_type: "image/jpeg",
-                    data: encode_image(image)?.data,
+                    data: image.base64()?,
                 },
             });
         }
@@ -151,15 +160,15 @@ impl<'a> Message<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentBlock<'a> {
     Text { text: &'a str },
-    Image { source: ImageSource },
+    Image { source: ImageSource<'a> },
 }
 
 #[derive(Serialize)]
-struct ImageSource {
+struct ImageSource<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     media_type: &'static str,
-    data: String,
+    data: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -212,14 +221,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serializes_text_and_base64_image_blocks() {
-        let message =
-            Message::user("translate", Some(&image::DynamicImage::new_rgb8(1, 1))).unwrap();
+    fn serializes_text_then_base64_image_blocks_in_page_order() {
+        let request = TranslationRequest::encoded_pages([
+            image::DynamicImage::new_rgb8(1, 1),
+            image::DynamicImage::new_rgb8(2, 2),
+        ]);
+        let images = &request.images;
+        let message = Message::user("translate", images).unwrap();
         let value = serde_json::to_value(message).unwrap();
         assert_eq!(value["content"][0]["type"], "text");
         assert_eq!(value["content"][1]["type"], "image");
         assert_eq!(value["content"][1]["source"]["type"], "base64");
         assert_eq!(value["content"][1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(
+            value["content"][1]["source"]["data"],
+            images[0].base64().unwrap()
+        );
+        assert_eq!(
+            value["content"][2]["source"]["data"],
+            images[1].base64().unwrap()
+        );
     }
 
     #[test]
@@ -228,7 +249,7 @@ mod tests {
             model: "claude-opus-4-8",
             max_tokens: 1024,
             system: "system",
-            messages: [Message::user("translate", None).unwrap()],
+            messages: [Message::user("translate", &[]).unwrap()],
             temperature: None,
             thinking: Some(ThinkingConfig { kind: "adaptive" }),
             output_config: OutputConfig {

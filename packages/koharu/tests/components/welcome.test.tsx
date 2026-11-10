@@ -81,6 +81,20 @@ describe('StartView', () => {
     expect(await screen.findByText('Opened Blue Archive')).toBeInTheDocument()
   })
 
+  it('opens a managed project in a new window', async () => {
+    vi.spyOn(commands, 'listProjects').mockResolvedValue([{ name: 'Blue Archive' }])
+    const openWindow = vi.spyOn(commands, 'openWindow').mockResolvedValue(null)
+    const open = vi.spyOn(commands, 'openProject')
+    render(<StartView />)
+
+    const button = await screen.findByRole('button', { name: 'Open Blue Archive in a new window' })
+    await waitFor(() => expect(button).toBeEnabled())
+    fireEvent.click(button)
+
+    await waitFor(() => expect(openWindow).toHaveBeenCalledExactlyOnceWith('Blue Archive'))
+    expect(open).not.toHaveBeenCalled()
+  })
+
   it('confirms before deleting a managed project', async () => {
     vi.spyOn(commands, 'listProjects')
       .mockResolvedValueOnce([{ name: 'Blue Archive' }])

@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use super::send_json;
 use crate::{
-    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::encode_image,
-    display_name, prompt,
+    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::Translations,
+    batch::Batching, display_name, prompt,
 };
 
 const RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
 const MODELS_URL: &str = "https://api.x.ai/v1/language-models";
+/// Context window assumed for Grok models.
+pub(super) const BATCHING: Batching = Batching::prompt(128_000);
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -25,7 +27,7 @@ pub(super) async fn translate(
     model: &str,
     generation: &GenerationConfig,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("grok")?.context("grok API key is not configured")?;
     let response: Response = send_json(
         "grok",
@@ -45,7 +47,7 @@ pub(super) async fn translate(
                 .flatten()
         })
         .context("Grok returned no output text")?;
-    Ok(prompt::translations("grok", &text, &request.segments)?)
+    prompt::translations("grok", &text, &request.segments)
 }
 
 pub(super) async fn models(client: &Client) -> Result<Vec<Model>> {
@@ -77,17 +79,19 @@ pub(super) async fn models(client: &Client) -> Result<Vec<Model>> {
 fn request_body<'a>(
     model: &'a str,
     generation: &GenerationConfig,
-    request: &TranslationRequest,
+    request: &'a TranslationRequest,
 ) -> anyhow::Result<Request<'a>> {
     let (system, user) = prompt::prompts(request)?;
-    let user_content = match request.image.as_deref() {
-        Some(image) => InputContent::Parts(vec![
-            InputPart::Text { text: user },
-            InputPart::Image {
-                image_url: encode_image(image)?.data_url(),
-            },
-        ]),
-        None => InputContent::Text(user),
+    let user_content = if request.images.is_empty() {
+        InputContent::Text(user)
+    } else {
+        let mut parts = vec![InputPart::Text { text: user }];
+        for image in &request.images {
+            parts.push(InputPart::Image {
+                image_url: image.data_url()?,
+            });
+        }
+        InputContent::Parts(parts)
     };
     Ok(Request {
         model,
@@ -123,7 +127,7 @@ fn request_body<'a>(
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
-    input: [InputMessage; 2],
+    input: [InputMessage<'a>; 2],
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -137,25 +141,25 @@ struct Request<'a> {
 }
 
 #[derive(Serialize)]
-struct InputMessage {
+struct InputMessage<'a> {
     role: &'static str,
-    content: InputContent,
+    content: InputContent<'a>,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum InputContent {
+enum InputContent<'a> {
     Text(String),
-    Parts(Vec<InputPart>),
+    Parts(Vec<InputPart<'a>>),
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum InputPart {
+enum InputPart<'a> {
     #[serde(rename = "input_text")]
     Text { text: String },
     #[serde(rename = "input_image")]
-    Image { image_url: String },
+    Image { image_url: &'a str },
 }
 
 #[derive(Serialize)]
@@ -212,8 +216,7 @@ mod tests {
 
     #[test]
     fn serializes_responses_schema_and_image_input() {
-        let request = TranslationRequest::new(["hello"], crate::Language::Japanese)
-            .with_image(std::sync::Arc::new(image::DynamicImage::new_rgb8(1, 1)));
+        let request = TranslationRequest::encoded_pages([image::DynamicImage::new_rgb8(1, 1)]);
         let body = request_body(
             "grok-4.5",
             &GenerationConfig {
@@ -232,6 +235,9 @@ mod tests {
         assert_eq!(value["text"]["format"]["strict"], true);
         assert_eq!(value["input"][1]["content"][0]["type"], "input_text");
         assert_eq!(value["input"][1]["content"][1]["type"], "input_image");
-        assert!(value["input"][1]["content"][1]["image_url"].is_string());
+        assert_eq!(
+            value["input"][1]["content"][1]["image_url"],
+            request.images[0].data_url().unwrap()
+        );
     }
 }

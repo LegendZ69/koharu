@@ -22,10 +22,17 @@ interface CanvasState {
   status: CanvasStatus
 }
 
+/**
+ * Presents a staged generation by calling `activate`, which draws the frame at once and returns
+ * whether it is now on screen. A caller wraps it to set up the view the frame first appears in.
+ */
+type PresentFrame = (generation: number, activate: () => boolean) => boolean
+
 export function useCanvas(
   element: HTMLCanvasElement | null,
   revision: number | null,
   generation: number,
+  present: PresentFrame = (_generation, activate) => activate(),
 ): CanvasState {
   const [canvasAttempt, setCanvasAttempt] = useState(0)
   const [loadAttempt, setLoadAttempt] = useState(0)
@@ -37,6 +44,7 @@ export function useCanvas(
   const hasFrameRef = useRef(false)
   const generationRef = useRef(generation)
   const revisionRef = useRef(revision)
+  const presentRef = useRef(present)
   const activeFrame = useRef<{
     canvas: Canvas
     generation: number
@@ -44,6 +52,7 @@ export function useCanvas(
   const request = useRef<object | null>(null)
   generationRef.current = generation
   revisionRef.current = revision
+  presentRef.current = present
 
   const updateHasFrame = useCallback((value: boolean) => {
     hasFrameRef.current = value
@@ -136,7 +145,9 @@ export function useCanvas(
       generationRef.current === requested &&
       revisionRef.current !== null
 
-    void prepareFrame(canvas, requested, current)
+    void prepareFrame(canvas, requested, current, (activate) =>
+      presentRef.current(requested, activate),
+    )
       .then((activated) => {
         if (!current() || !activated) return
         activeFrame.current = { canvas, generation: requested }
@@ -166,6 +177,7 @@ async function prepareFrame(
   canvas: Canvas,
   generation: number,
   current: () => boolean,
+  present: (activate: () => boolean) => boolean,
 ): Promise<boolean> {
   const manifest = await fetchCanvasManifest(generation)
   if (!current()) return false
@@ -182,7 +194,7 @@ async function prepareFrame(
     await Promise.all(packets.map(([resource, packet]) => canvas.installResource(resource, packet)))
   }
   if (!current()) return false
-  const activated = canvas.activateFrame(staged.token)
+  const activated = present(() => canvas.activateFrame(staged.token))
   if (!current()) return false
   if (!activated) throw new Error('The prepared canvas frame was superseded before activation.')
   return true

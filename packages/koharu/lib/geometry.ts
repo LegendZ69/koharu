@@ -9,6 +9,11 @@ export interface Camera {
   translation: [number, number]
 }
 
+export type CanvasFit = 'page' | 'width'
+
+// CSS px a width fit keeps clear; the left inset clears the floating tool rail.
+const widthInset = { left: 64, right: 16, top: 16, bottom: 16 }
+
 export interface CssFrame {
   left: number
   top: number
@@ -46,6 +51,85 @@ export function pagePoint(
     x: (point.x - camera.translation[0]) / camera.zoom,
     y: (point.y - camera.translation[1]) / camera.zoom,
   }
+}
+
+export function fitCamera(
+  fit: CanvasFit,
+  viewportWidth: number,
+  viewportHeight: number,
+  pageWidth: number,
+  pageHeight: number,
+  dpr: number,
+): Camera {
+  return fit === 'width'
+    ? widthCamera(viewportWidth, viewportHeight, pageWidth, pageHeight, dpr)
+    : containCamera(viewportWidth, viewportHeight, pageWidth, pageHeight)
+}
+
+export function containCamera(
+  viewportWidth: number,
+  viewportHeight: number,
+  pageWidth: number,
+  pageHeight: number,
+): Camera {
+  if (viewportWidth <= 0 || viewportHeight <= 0 || pageWidth <= 0 || pageHeight <= 0) {
+    return { zoom: 1, translation: [0, 0] }
+  }
+  const zoom = Math.max(
+    Number.EPSILON,
+    Math.min(viewportWidth / pageWidth, viewportHeight / pageHeight),
+  )
+  return {
+    zoom,
+    translation: [
+      (viewportWidth - pageWidth * zoom) * 0.5,
+      (viewportHeight - pageHeight * zoom) * 0.5,
+    ],
+  }
+}
+
+/**
+ * Fills the width between the insets. A tall page starts at its top edge; with `previous`, the page
+ * row under the top inset stays there instead, so a resize keeps the reading position.
+ */
+export function widthCamera(
+  viewportWidth: number,
+  viewportHeight: number,
+  pageWidth: number,
+  pageHeight: number,
+  dpr: number,
+  previous?: Camera,
+): Camera {
+  const usableWidth = viewportWidth - (widthInset.left + widthInset.right) * dpr
+  if (usableWidth <= 0 || viewportHeight <= 0 || pageWidth <= 0 || pageHeight <= 0) {
+    return { zoom: 1, translation: [0, 0] }
+  }
+  const zoom = Math.max(Number.EPSILON, usableWidth / pageWidth)
+  const top = widthInset.top * dpr
+  const y = previous ? top - ((top - previous.translation[1]) / previous.zoom) * zoom : top
+  return {
+    zoom,
+    translation: [widthInset.left * dpr, widthScroll(y, zoom, pageHeight, viewportHeight, dpr)],
+  }
+}
+
+/**
+ * Keeps a width-fitted page's top edge at or above the top inset and its bottom edge at or below
+ * the bottom inset; a page shorter than the space between them is centered.
+ */
+export function widthScroll(
+  translationY: number,
+  zoom: number,
+  pageHeight: number,
+  viewportHeight: number,
+  dpr: number,
+): number {
+  const height = pageHeight * zoom
+  const maxY = widthInset.top * dpr
+  const minY = viewportHeight - widthInset.bottom * dpr - height
+  return minY <= maxY
+    ? Math.min(maxY, Math.max(minY, translationY))
+    : (viewportHeight - height) * 0.5
 }
 
 export function draftFrame(start: Point, end: Point): Frame {

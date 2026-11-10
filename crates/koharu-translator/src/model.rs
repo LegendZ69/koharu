@@ -2,7 +2,7 @@ use koharu_ml::llm::GenerationOptions;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use crate::Provider;
+use crate::{Provider, batch};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(default)]
@@ -11,6 +11,7 @@ pub struct GenerationConfig {
     pub top_k: Option<u32>,
     pub top_p: Option<f32>,
     pub min_p: Option<f32>,
+    /// Output budget per page; a multi-page request scales it by its page count, up to a cap.
     pub max_tokens: Option<u32>,
     pub repeat_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
@@ -45,6 +46,17 @@ impl GenerationConfig {
                 None
             },
             vision: if model.vision { self.vision } else { None },
+            ..self
+        }
+    }
+
+    /// Scales a set per-page output budget to a request of `pages` pages. An unset budget stays
+    /// unset; a provider that must send one scales its own per-page default the same way.
+    pub(crate) fn for_pages(self, pages: usize) -> Self {
+        Self {
+            max_tokens: self
+                .max_tokens
+                .map(|tokens| batch::output_tokens(tokens as usize, pages) as u32),
             ..self
         }
     }
@@ -207,6 +219,24 @@ mod tests {
         let unsupported = generation.for_model(&selection(false, false));
         assert_eq!(unsupported.vision, None);
         assert_eq!(unsupported.reasoning, None);
+    }
+
+    #[test]
+    fn output_budget_is_per_page_up_to_the_batch_cap() {
+        let tokens = |max_tokens, pages| {
+            GenerationConfig {
+                max_tokens,
+                ..GenerationConfig::default()
+            }
+            .for_pages(pages)
+            .max_tokens
+        };
+        assert_eq!(tokens(Some(1_000), 1), Some(1_000));
+        assert_eq!(tokens(Some(1_000), 4), Some(4_000));
+        assert_eq!(tokens(Some(1_000), 40), Some(32_768));
+        assert_eq!(tokens(Some(40_000), 1), Some(40_000));
+        assert_eq!(tokens(Some(40_000), 3), Some(40_000));
+        assert_eq!(tokens(None, 4), None);
     }
 
     #[test]

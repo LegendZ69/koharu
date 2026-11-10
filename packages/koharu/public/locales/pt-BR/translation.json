@@ -56,6 +56,7 @@
   "canvas": {
     "empty": "Selecione uma página para começar.",
     "fit": "Ajustar à janela",
+    "fitWidth": "Ajustar à largura",
     "surface": "Tela do Koharu",
     "unavailable": "A tela WebGPU não está disponível"
   },
@@ -152,9 +153,7 @@
     "stageCount": "{{count}} etapas",
     "stageCount_one": "{{count}} etapas",
     "stageCount_other": "{{count}} etapas",
-    "stages": "Etapas",
-    "stop": "Parar",
-    "stopProcessing": "Parar processamento"
+    "stages": "Etapas"
   },
   "inspector": {
     "alignBottom": "Alinhar embaixo",
@@ -252,9 +251,11 @@
     "export": "Exportar projeto",
     "file": "Arquivo",
     "fit": "Ajustar à janela",
+    "fitWidth": "Ajustar à largura",
     "github": "GitHub",
     "help": "Ajuda",
     "import": "Importar páginas",
+    "newWindow": "Nova janela",
     "process": "Processar",
     "processLayers": "Processar camadas selecionadas",
     "processPages": "Processar páginas selecionadas",
@@ -366,7 +367,7 @@
       "description": "Ajuste como os modelos de linguagem geram o texto traduzido.",
       "enableReasoning": "Ativar raciocínio",
       "frequencyPenalty": "Penalidade de frequência",
-      "maxTokens": "Máximo de tokens",
+      "maxTokens": "Máximo de tokens por página",
       "minP": "P mínimo",
       "presencePenalty": "Penalidade de presença",
       "repeatPenalty": "Penalidade de repetição",
@@ -436,6 +437,21 @@
     },
     "title": "Configurações",
     "translation": {
+      "batching": "Processamento em lotes",
+      "batchingDescription": "Escolha como as páginas são agrupadas nas solicitações de tradução.",
+      "batchingMode": "Modo de lotes",
+      "batchingModeDescriptions": {
+        "all": "Envia todas as páginas em uma única solicitação.",
+        "auto": "Agrupa as páginas conforme a janela de contexto do modelo e divide uma solicitação que ainda seja grande demais.",
+        "custom": "Envia um número fixo de páginas por solicitação.",
+        "halving": "Envia todas as páginas em uma única solicitação e divide ao meio uma solicitação grande demais, até chegar a páginas individuais."
+      },
+      "batchingModes": {
+        "all": "Todas as páginas",
+        "auto": "Automático",
+        "custom": "Personalizado",
+        "halving": "Divisão ao meio"
+      },
       "description": "Escolha um modelo de qualquer provedor configurado e aplique um conjunto compartilhado de opções de tradução e geração.",
       "instructionsDescription": "Orientações de nomes, tom, terminologia ou formatação.",
       "instructionsLabel": "Instruções de tradução",
@@ -444,6 +460,7 @@
       "modelDescription": "Os rótulos de provedor indicam onde cada modelo é executado; as conexões são configuradas separadamente.",
       "modelQuantization": "Quantização do modelo",
       "output": "Saída",
+      "pagesPerRequest": "Páginas por solicitação",
       "quantization": "Quantização",
       "quantizationDescription": "Formatos menores usam menos memória, geralmente com perda de qualidade.",
       "selectQuantization": "Selecionar uma quantização",
@@ -479,6 +496,8 @@
     "loadingProjects": "Carregando projetos…",
     "newDescription": "Crie um espaço de trabalho limpo para suas páginas, traduções e exportações.",
     "newProject": "Novo projeto",
+    "openInNewWindow": "Abrir em nova janela",
+    "openInNewWindowLabel": "Abrir {{name}} em nova janela",
     "projectKind": "Projeto do Koharu",
     "projectList": "Projetos",
     "projectName": "Nome do projeto",

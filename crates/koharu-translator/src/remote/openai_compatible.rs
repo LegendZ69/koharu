@@ -8,11 +8,13 @@ use url::Url;
 
 use super::send_json;
 use crate::{
-    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::encode_image,
-    display_name, prompt,
+    GenerationConfig, Model, PageImage, Provider, Result, TranslationRequest,
+    backend::Translations, batch::Batching, display_name, prompt,
 };
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
+/// Self-hosted servers often run small contexts.
+pub(super) const BATCHING: Batching = Batching::prompt(8_192);
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -36,20 +38,10 @@ pub(super) async fn translate(
     model: &str,
     generation: &GenerationConfig,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("openai-compatible")?;
     let (system, user) = prompt::prompts(request)?;
-    let user_content = match request.image.as_deref() {
-        Some(image) => MessageContent::Parts(vec![
-            ContentPart::Text { text: user },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: encode_image(image)?.data_url(),
-                },
-            },
-        ]),
-        None => MessageContent::Text(user),
-    };
+    let user_content = MessageContent::user(user, &request.images)?;
     let body = ChatRequest {
         model,
         messages: [
@@ -95,11 +87,7 @@ pub(super) async fn translate(
         .message
         .content
         .context("OpenAI-compatible backend returned no message content")?;
-    Ok(prompt::translations(
-        "openai-compatible",
-        &text,
-        &request.segments,
-    )?)
+    prompt::translations("openai-compatible", &text, &request.segments)
 }
 
 pub(super) async fn models(client: &Client, config: &OpenAiCompatibleConfig) -> Result<Vec<Model>> {
@@ -136,7 +124,7 @@ fn endpoint(base_url: Option<&Url>, suffix: &str) -> String {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: [Message; 2],
+    messages: [Message<'a>; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,28 +155,45 @@ struct JsonSchema {
 }
 
 #[derive(Serialize)]
-struct Message {
+struct Message<'a> {
     role: &'static str,
-    content: MessageContent,
+    content: MessageContent<'a>,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum MessageContent {
+enum MessageContent<'a> {
     Text(String),
-    Parts(Vec<ContentPart>),
+    Parts(Vec<ContentPart<'a>>),
+}
+
+impl<'a> MessageContent<'a> {
+    fn user(text: String, images: &'a [PageImage]) -> anyhow::Result<Self> {
+        if images.is_empty() {
+            return Ok(Self::Text(text));
+        }
+        let mut parts = vec![ContentPart::Text { text }];
+        for image in images {
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: image.data_url()?,
+                },
+            });
+        }
+        Ok(Self::Parts(parts))
+    }
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContentPart {
+enum ContentPart<'a> {
     Text { text: String },
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl { image_url: ImageUrl<'a> },
 }
 
 #[derive(Serialize)]
-struct ImageUrl {
-    url: String,
+struct ImageUrl<'a> {
+    url: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -278,7 +283,7 @@ mod tests {
             },
             ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: "data:image/jpeg;base64,image".to_owned(),
+                    url: "data:image/jpeg;base64,image",
                 },
             },
         ]);

@@ -6,14 +6,16 @@ use koharu_secrets::ExposeSecret;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::send_json;
+use super::{send_json, send_json_sized};
 use crate::{
-    GenerationConfig, Model, Provider, Result, TranslationRequest, backend::encode_image,
-    display_name, prompt,
+    GenerationConfig, Model, PageImage, Provider, Result, TranslationRequest,
+    backend::Translations, batch::Batching, display_name, prompt,
 };
 
 const URL: &str = "https://api.openai.com/v1/chat/completions";
 const MODELS_URL: &str = "https://api.openai.com/v1/models";
+/// Every supported chat family has at least this context window.
+pub(super) const BATCHING: Batching = Batching::prompt(128_000);
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -76,20 +78,10 @@ pub(super) async fn translate(
     model: &str,
     generation: &GenerationConfig,
     request: &TranslationRequest,
-) -> Result<Vec<String>> {
+) -> Result<Translations> {
     let api_key = koharu_secrets::get("openai")?.context("openai API key is not configured")?;
     let (system, user) = prompt::prompts(request)?;
-    let user_content = match request.image.as_deref() {
-        Some(image) => MessageContent::Parts(vec![
-            ContentPart::Text { text: user },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: encode_image(image)?.data_url(),
-                },
-            },
-        ]),
-        None => MessageContent::Text(user),
-    };
+    let user_content = MessageContent::user(user, &request.images)?;
     let body = ChatRequest {
         model,
         messages: [
@@ -119,12 +111,13 @@ pub(super) async fn translate(
             },
         },
     };
-    let response: ChatResponse = send_json(
+    let response: ChatResponse = send_json_sized(
         "openai",
         client
             .post(URL)
             .bearer_auth(api_key.expose_secret())
             .json(&body),
+        request_too_large,
     )
     .await?;
     let text = response
@@ -135,13 +128,20 @@ pub(super) async fn translate(
         .message
         .content
         .context("OpenAI returned no message content")?;
-    Ok(prompt::translations("openai", &text, &request.segments)?)
+    prompt::translations("openai", &text, &request.segments)
+}
+
+/// OpenAI answers HTTP 429 "Request too large for … on tokens per min" (or "input-images per
+/// min") when one request alone exceeds a per-minute limit, which waiting cannot fix. Ordinary
+/// rate limits say "Rate limit reached for …" and quota failures "You exceeded your current quota".
+fn request_too_large(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("request too large for")
 }
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: [Message; 2],
+    messages: [Message<'a>; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,28 +172,45 @@ struct JsonSchema {
 }
 
 #[derive(Serialize)]
-struct Message {
+struct Message<'a> {
     role: &'static str,
-    content: MessageContent,
+    content: MessageContent<'a>,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum MessageContent {
+enum MessageContent<'a> {
     Text(String),
-    Parts(Vec<ContentPart>),
+    Parts(Vec<ContentPart<'a>>),
+}
+
+impl<'a> MessageContent<'a> {
+    fn user(text: String, images: &'a [PageImage]) -> anyhow::Result<Self> {
+        if images.is_empty() {
+            return Ok(Self::Text(text));
+        }
+        let mut parts = vec![ContentPart::Text { text }];
+        for image in images {
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: image.data_url()?,
+                },
+            });
+        }
+        Ok(Self::Parts(parts))
+    }
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContentPart {
+enum ContentPart<'a> {
     Text { text: String },
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl { image_url: ImageUrl<'a> },
 }
 
 #[derive(Serialize)]
-struct ImageUrl {
-    url: String,
+struct ImageUrl<'a> {
+    url: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -223,7 +240,10 @@ struct ListedModel {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::StatusCode;
+
     use super::*;
+    use crate::{Translator, remote::failure};
 
     #[test]
     fn filters_models_to_the_chat_translation_contract() {
@@ -272,5 +292,51 @@ mod tests {
         assert_eq!(value["reasoning_effort"], "none");
         assert_eq!(value["response_format"]["type"], "json_schema");
         assert_eq!(value["response_format"]["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn serializes_text_then_every_page_image_in_order() {
+        let request = TranslationRequest::encoded_pages([
+            image::DynamicImage::new_rgb8(1, 1),
+            image::DynamicImage::new_rgb8(2, 2),
+        ]);
+        let images = &request.images;
+        let content = MessageContent::user("translate".to_owned(), images).unwrap();
+        let value = serde_json::to_value(content).unwrap();
+
+        assert_eq!(
+            value[0],
+            serde_json::json!({ "type": "text", "text": "translate" })
+        );
+        assert_eq!(value[1]["type"], "image_url");
+        assert_eq!(value[1]["image_url"]["url"], images[0].data_url().unwrap());
+        assert_eq!(value[2]["image_url"]["url"], images[1].data_url().unwrap());
+
+        let text = MessageContent::user("translate".to_owned(), &[]).unwrap();
+        assert_eq!(serde_json::to_value(text).unwrap(), "translate");
+    }
+
+    #[test]
+    fn only_a_request_over_a_per_minute_limit_is_too_large() {
+        let too_large = |message: &str, recognize: fn(&str) -> bool| {
+            // The wording arrives inside OpenAI's JSON error envelope.
+            let body = serde_json::json!({ "error": { "message": message } }).to_string();
+            let error = failure("openai", StatusCode::TOO_MANY_REQUESTS, &body, recognize);
+            Translator::is_oversize(&error.into())
+        };
+        for message in [
+            "Request too large for gpt-4o on tokens per min (TPM): Limit 30000, Requested 49634.",
+            "Request too large for gpt-4o on input-images per min: Limit 10, Requested 26.",
+        ] {
+            assert!(too_large(message, request_too_large), "{message}");
+            // A provider that does not recognize the wording keeps every 429 a quota failure.
+            assert!(!too_large(message, |_| false), "{message}");
+        }
+        for message in [
+            "Rate limit reached for gpt-4o on tokens per min (TPM): Used 28000, Requested 5000.",
+            "You exceeded your current quota, please check your plan and billing details.",
+        ] {
+            assert!(!too_large(message, request_too_large), "{message}");
+        }
     }
 }

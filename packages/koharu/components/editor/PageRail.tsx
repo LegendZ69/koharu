@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next'
 
 import { ResourceMonitor } from '@/components/editor/ResourceMonitor'
 import { call } from '@/lib/backend'
+import { fitCamera } from '@/lib/geometry'
 import {
   pageKey,
   pagesKey,
@@ -133,7 +134,23 @@ export function PageRail() {
     const previousProject = queryClient.getQueryData<ProjectInfo | null>(projectKey)
     const previousPage = queryClient.getQueryData<Page | null>(pageKey)
     const prepared = queryClient.getQueryData<CanvasPagePreparation>(preparedPageKey(page.id))
+    // A cached page presents inside showCanvasPage, so its fitted camera must be in place first.
+    // An uncached page presents later, and the workspace fits it as its first frame is drawn; until
+    // then the current page keeps its camera.
+    const { camera, canvasViewport, fitMode } = useKoharuStore.getState()
+    if (page.id !== active) {
+      const fitted = fitCamera(
+        fitMode,
+        canvasViewport[0],
+        canvasViewport[1],
+        page.size.width,
+        page.size.height,
+        window.devicePixelRatio,
+      )
+      useKoharuStore.setState({ camera: { ...fitted, fit: fitMode } })
+    }
     const activated = showCanvasPage(page.id, previousProject?.revision ?? null)
+    if (!activated) useKoharuStore.setState({ camera })
     const request = ++selectionRequest.current
     const synchronize = () => {
       if (selectionRequest.current !== request) return

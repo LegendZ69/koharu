@@ -13,7 +13,6 @@ use koharu_scene::{
 };
 use serde::Serialize;
 use specta::Type;
-use tokio::sync::Mutex;
 
 use super::{
     canvas::Point,
@@ -171,10 +170,6 @@ pub struct Typography {
     pub writing_mode: Option<koharu_scene::WritingMode>,
 }
 
-pub(crate) struct CurrentProject {
-    pub(crate) project: Mutex<Option<Project>>,
-}
-
 #[derive(Clone)]
 pub(crate) struct ProjectLibrary {
     root: PathBuf,
@@ -226,16 +221,6 @@ impl ProjectLibrary {
         Ok(projects.into_iter().map(|(_, project)| project).collect())
     }
 
-    pub(crate) async fn create(&self, name: &str) -> Result<Project> {
-        let (name, path) = self.resolve(name)?;
-        Project::create(name, path).await
-    }
-
-    pub(crate) async fn open(&self, name: &str) -> Result<Project> {
-        let (name, path) = self.resolve(name)?;
-        Project::open(name, path).await
-    }
-
     pub(crate) fn delete(&self, name: &str) -> Result<()> {
         let (_, path) = self.resolve(name)?;
         if !path.is_dir() {
@@ -245,7 +230,7 @@ impl ProjectLibrary {
             .with_context(|| format!("failed to delete {}", path.display()))
     }
 
-    fn resolve(&self, name: &str) -> Result<(String, PathBuf)> {
+    pub(crate) fn resolve(&self, name: &str) -> Result<(String, PathBuf)> {
         let name = validate_project_name(name)?;
         Ok((name.clone(), self.root.join(format!("{name}.khrproj"))))
     }

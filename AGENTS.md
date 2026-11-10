@@ -21,8 +21,8 @@ Document only durable, repository-specific constraints here. Do not record curre
 - Scene owns what a project means. Storage owns opaque payloads and immutable blobs. Analysis, content, and presentation stay separate: detection geometry is not a visible layer, translation does not drop OCR provenance, and typography does not rewrite semantic text.
 - A patch binds to a project and a base revision, records preconditions, and carries inverses. Reject a stale patch. Derived work rebases explicitly and fails if anything it observed has changed.
 - Publish missing blobs first, write the inactive state slot, then publish atomically. Opening uses the newest valid slot and can fall back. Renderer, pipeline, and Agent consume snapshots and submit patches. They do not write storage files.
-- A pipeline stage runs on one page: detection, then OCR and translation, or detection, then inpainting. Pages enter in project order. Completed detection makes that page's later stages eligible immediately. At most one job per stage runs at a time. Each committed result is its own undo step. Do not add a second translation prompt path.
-- Accelerator inference uses one admission lane, including remote translation. On out-of-memory, release the lane, unload the other models, wait for a fresh resource sample, and retry once. Any other failure unloads the failing stage. Stopping is cooperative and discards an uncommitted result.
+- Pipeline stages run detection, then OCR and translation, or detection, then inpainting. A stage runs on one page, except translation, which runs on a batch of pages chosen by the translation batching mode (all, halving, custom, auto). Pages enter in project order. Completed detection makes that page's page-local stages eligible immediately; a translation batch is eligible when its pages finished OCR. At most one job per stage runs at a time across all concurrent runs, and a page is processed by at most one run of its project at a time. Each page's committed result is its own undo step, also inside a batch. Do not add a second translation prompt path.
+- Accelerator inference uses one admission lane shared by every run; remote translation does not take it. On out-of-memory, release the lane, unload the other models, wait for a fresh resource sample, and retry once. Any other failure unloads the failing stage. Stopping is cooperative and discards an uncommitted result: a stopped job leaves admission queues and abandons a remote request at once, but accelerated work is never abandoned mid-flight.
 - One prepared frame feeds presentation, PNG, layer crops, and PSD. Translation is the only visible text. Incremental reuse must match a full render. The previous page stays visible until the staged generation is ready. An obsolete preparation cannot replace a newer generation. Transient camera, transform, stroke, and sampling stay in the browser. Completed edits cross commands.
 
 ## Interface
@@ -54,7 +54,7 @@ Document only durable, repository-specific constraints here. Do not record curre
 - Disable gradient tracking during inference.
 - Create generated token IDs and index tensors on the model device. A CPU tensor used against accelerator embeddings is a defect, not a later optimization.
 - Invalid model JSON fails closed. Do not add a silent repair layer that can change meaning.
-- Enforce a translation output schema through each provider's native structured-output API. A bounded retry belongs only to a provider that already has one. Hosted machine-translation providers fail immediately.
+- Enforce a translation output schema through each provider's native structured-output API. A bounded retry belongs only to a provider that already has one. Halving splits a size-failed multi-page language-model request into smaller requests; it is not a retry of the same request. Hosted machine-translation providers fail immediately and chunk requests to their documented limits.
 
 ## Upstream Alignment
 

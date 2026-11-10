@@ -7,9 +7,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use super::send_json;
-use crate::{Error, Language, Model, Provider, Result, TranslationRequest};
+use crate::{Error, Language, Model, Provider, Result, TranslationRequest, batch::Batching};
 
 const URL: &str = "https://api.interpreter.caiyunai.com/v1/translator";
+/// Requests are chunked below, so this window only sizes page batches.
+pub(super) const BATCHING: Batching = Batching::chunked(128_000);
+/// A conservative number of sources per request.
+const MAX_SOURCES: usize = 50;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(default)]
@@ -33,47 +37,58 @@ pub(super) async fn translate(
         provider: "caiyun",
         language: request.target_language,
     })?;
-    let response: Response = send_json(
-        "caiyun",
-        client
-            .post(URL)
-            .header(
-                "X-Authorization",
-                format!("token {}", api_key.expose_secret()),
-            )
-            .json(&Request {
-                source: &request.segments,
-                trans_type: format!("auto2{target}"),
-                request_id: "koharu-translator",
-                detect: true,
-                media: "text",
-            }),
-    )
-    .await?;
-    if response.rc != 0 {
-        return Err(anyhow!(
-            "Caiyun returned rc={}: {}",
-            response.rc,
-            response
-                .msg
-                .or(response.message)
-                .or(response.error)
-                .unwrap_or_else(|| "unknown error".to_owned())
+    let trans_type = format!("auto2{target}");
+    let mut translations = Vec::with_capacity(request.segments.len());
+    for source in request.segments.chunks(MAX_SOURCES) {
+        let response: Response = send_json(
+            "caiyun",
+            client
+                .post(URL)
+                .header(
+                    "X-Authorization",
+                    format!("token {}", api_key.expose_secret()),
+                )
+                .json(&Request {
+                    source,
+                    trans_type: &trans_type,
+                    request_id: "koharu-translator",
+                    detect: true,
+                    media: "text",
+                }),
         )
-        .into());
-    }
-    Ok(
-        match response.target.context("Caiyun returned no target")? {
+        .await?;
+        if response.rc != 0 {
+            return Err(anyhow!(
+                "Caiyun returned rc={}: {}",
+                response.rc,
+                response
+                    .msg
+                    .or(response.message)
+                    .or(response.error)
+                    .unwrap_or_else(|| "unknown error".to_owned())
+            )
+            .into());
+        }
+        let chunk = match response.target.context("Caiyun returned no target")? {
             Target::One(text) => vec![text],
             Target::Many(texts) => texts,
-        },
-    )
+        };
+        if chunk.len() != source.len() {
+            return Err(Error::SegmentCount {
+                provider: "caiyun",
+                expected: source.len(),
+                actual: chunk.len(),
+            });
+        }
+        translations.extend(chunk);
+    }
+    Ok(translations)
 }
 
 #[derive(Serialize)]
 struct Request<'a> {
     source: &'a [String],
-    trans_type: String,
+    trans_type: &'a str,
     request_id: &'static str,
     detect: bool,
     media: &'static str,
